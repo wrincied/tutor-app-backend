@@ -1,18 +1,37 @@
-const errorHandler = (err, req, res, next) => {
-  console.error(err.stack);
+function isFirebaseNotFound(error) {
+  return error && (error.code === 5 || error.code === 'not-found');
+}
 
-  // Mongoose validation error
-  if (err.name === 'ValidationError') {
-    const messages = Object.values(err.errors).map((e) => e.message);
-    return res.status(400).json({ message: messages.join(', ') });
+const errorHandler = (error, req, res, _next) => {
+  if (res.headersSent) {
+    return;
   }
 
-  // Mongoose duplicate key
-  if (err.code === 11000) {
-    return res.status(409).json({ message: 'Такая запись уже существует' });
+  const status =
+    error.status ||
+    error.statusCode ||
+    (isFirebaseNotFound(error) ? 404 : 500);
+
+  const message =
+    error.expose && error.message
+      ? error.message
+      : status >= 500
+        ? 'Internal server error'
+        : error.message || 'Request failed';
+
+  if (status >= 500) {
+    console.error('[ERROR]', {
+      method: req.method,
+      path: req.originalUrl,
+      message: error.message,
+      stack: error.stack,
+    });
   }
 
-  res.status(err.status || 500).json({ message: err.message || 'Внутренняя ошибка сервера' });
+  res.status(status).json({
+    message,
+    ...(process.env.NODE_ENV !== 'production' && { details: error.message }),
+  });
 };
 
 module.exports = errorHandler;

@@ -17,7 +17,7 @@ const password = process.argv[3] || process.env.RESET_USER_PASSWORD || '';
 
 async function main() {
   if (!process.env.FIREBASE_PROJECT_ID) {
-    console.error('В .env не задан FIREBASE_PROJECT_ID. Нужны Application Default Credentials (gcloud auth application-default login).');
+    console.error('В .env не заданы переменные Firebase (FIREBASE_PROJECT_ID, ...).');
     process.exit(1);
   }
   if (!email || !password) {
