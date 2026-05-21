@@ -5,9 +5,12 @@ const auth = require('../middleware/auth');
 const checkLessonCollision = require('../middleware/lessonCollision');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
+const {
+  studentSnapshotFromStudent,
+  enrichLessonSnapshot,
+} = require('../utils/lessonSnapshot');
 
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
-const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB']);
 
 function clampDuration(raw) {
   const minutes = Number(raw);
@@ -37,8 +40,18 @@ router.use(auth);
 router.get('/', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
-    const snap = await db.collection('lessons').where('tutor', '==', tutorId).get();
-    const lessons = serializeQuerySnapshot(snap);
+    const [lessonsSnap, studentsSnap] = await Promise.all([
+      db.collection('lessons').where('tutor', '==', tutorId).get(),
+      db.collection('students').where('tutor_id', '==', tutorId).get(),
+    ]);
+    const studentById = new Map();
+    studentsSnap.forEach((doc) => {
+      const row = serializeDoc(doc);
+      studentById.set(row._id, row);
+    });
+    const lessons = serializeQuerySnapshot(lessonsSnap).map((lesson) =>
+      enrichLessonSnapshot(lesson, studentById),
+    );
     lessons.sort((left, right) => {
       const l = left.scheduledAt ? Date.parse(left.scheduledAt) : 0;
       const r = right.scheduledAt ? Date.parse(right.scheduledAt) : 0;
@@ -67,6 +80,15 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       return res.status(400).json({ message: 'student_id is required' });
     }
 
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_price') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency')
+    ) {
+      return res.status(400).json({
+        message: 'lesson_price and lesson_currency are snapshot fields and cannot be set directly',
+      });
+    }
+
     const studentData = await ensureStudentOwned(normalizedStudentId, tutorId);
     if (!studentData) {
       return res.status(400).json({ message: 'Student not found' });
@@ -76,19 +98,18 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
     if (Number.isNaN(ratePerHour) || ratePerHour < 0) {
       return res.status(400).json({ message: 'Student rate_per_hour is invalid' });
     }
+    const snapshot = studentSnapshotFromStudent(studentData);
 
     const normalizedStatus = ALLOWED_STATUS.has(status) ? status : 'scheduled';
     const normalizedDuration = clampDuration(lesson_duration);
-    const currencySnapshot = ALLOWED_CURRENCY.has(studentData.rate_currency)
-      ? studentData.rate_currency
-      : 'EUR';
 
     const createdRef = await db.collection('lessons').add({
       tutor: tutorId,
       student_id: normalizedStudentId,
       student_name: studentData.name || null,
-      lesson_price: ratePerHour,
-      lesson_currency: currencySnapshot,
+      lesson_price: snapshot.lesson_price,
+      lesson_currency: snapshot.lesson_currency,
+      student_timezone: snapshot.student_timezone,
       lesson_duration: normalizedDuration,
       status: normalizedStatus,
       title: title ? String(title).trim() : '',
@@ -137,8 +158,27 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       if (normalizedStudentId && !studentData) {
         return res.status(400).json({ message: 'Student not found' });
       }
+      const previousStudentId = existing.student_id ?? null;
       patch.student_id = normalizedStudentId;
       patch.student_name = studentData?.name || null;
+      if (normalizedStudentId !== previousStudentId) {
+        if (studentData) {
+          Object.assign(patch, studentSnapshotFromStudent(studentData));
+        } else {
+          patch.lesson_price = 0;
+          patch.lesson_currency = 'EUR';
+          patch.student_timezone = 'UTC';
+        }
+      }
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_price') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency')
+    ) {
+      return res.status(400).json({
+        message: 'lesson_price and lesson_currency are snapshot fields and cannot be set directly',
+      });
     }
 
     if (lesson_duration !== undefined) {

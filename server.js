@@ -16,6 +16,9 @@ app.use(
     allowedHeaders: ['Content-Type', 'Authorization'],
   }),
 );
+const billingWebhookRoutes = require('./src/routes/billingWebhook');
+app.use('/api/billing/webhook', billingWebhookRoutes);
+
 app.use(express.json());
 
 // 4. ОСТАЛЬНЫЕ РОУТЫ
@@ -23,9 +26,11 @@ const authRoutes = require('./src/routes/auth');
 const studentRoutes = require('./src/routes/students');
 const lessonRoutes = require('./src/routes/lessons');
 const financeRoutes = require('./src/routes/finance');
+const billingRoutes = require('./src/routes/billing');
 const errorHandler = require('./src/middleware/error');
 
 app.use('/api/auth', authRoutes);
+app.use('/api/billing', billingRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/lessons', lessonRoutes);
 app.use('/api/finance', financeRoutes);

@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "reset-password": "node scripts/reset-user-password.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "confirm-subscription": "node scripts/confirm-subscription.js",
+    "test": "node --test src/**/*.test.js"
   },
   "keywords": [],
   "author": "",
