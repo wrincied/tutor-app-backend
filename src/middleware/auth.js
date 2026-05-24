@@ -1,4 +1,5 @@
 const { admin } = require('../firebase');
+const { isDisposableEmail } = require('../utils/disposableEmailDomain');
 
 async function auth(req, res, next) {
   const header = req.headers.authorization;
@@ -11,6 +12,11 @@ async function auth(req, res, next) {
 
   try {
     const decoded = await admin.auth().verifyIdToken(token);
+    if (isDisposableEmail(decoded.email)) {
+      return res.status(403).json({
+        message: 'Disposable email domains are not allowed',
+      });
+    }
     req.user = {
       id: decoded.uid,
       email: decoded.email || null,

@@ -13,6 +13,7 @@ const {
   getSubscriptionPricing,
   getStripePriceIdForCountry,
 } = require('../utils/subscriptionPricing');
+const { primaryFrontendUrl } = require('../utils/corsOrigins');
 
 const router = express.Router();
 
@@ -52,7 +53,7 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
     const pricing = getSubscriptionPricing(pricingCountry);
     const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
     const priceId = getStripePriceIdForCountry(pricingCountry, interval);
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
+    const frontendUrl = primaryFrontendUrl();
 
     if (!stripe || !priceId) {
       return res.status(503).json({

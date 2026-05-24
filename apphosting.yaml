@@ -7,4 +7,16 @@ runConfig:
   cpu: 1
   memoryMiB: 512
 
+# Разрешённые фронтенды для CORS (comma-separated).
+env:
+  - variable: FRONTEND_URL
+    value: >-
+      https://tutor-app--tutorassis.europe-west4.hosted.app,
+      https://simple4u-64822.web.app,
+      https://simple4u-64822.firebaseapp.com,
+      https://tutorassis.web.app,
+      https://tutorassis.firebaseapp.com
+    availability:
+      - RUNTIME
+
 # Секреты (JWT, Stripe, Firebase SA) задайте в Firebase Console → App Hosting → Environment.

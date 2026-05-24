@@ -5,6 +5,7 @@ const {
   verificationExpiresAt,
   accountPurgeAt,
 } = require('../utils/emailVerification');
+const { primaryFrontendUrl } = require('../utils/corsOrigins');
 
 function smtpConfigured() {
   return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER);
@@ -24,7 +25,7 @@ function createTransport() {
 }
 
 function verificationLink(token) {
-  const frontend = (process.env.FRONTEND_URL || 'http://localhost:4200').replace(/\/$/, '');
+  const frontend = primaryFrontendUrl();
   return `${frontend}/verify-email?token=${encodeURIComponent(token)}`;
 }
 
