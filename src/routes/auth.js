@@ -66,10 +66,8 @@ router.post('/bootstrap', auth, async (req, res, next) => {
 
 router.get('/me', auth, async (req, res, next) => {
   try {
-    const userSnap = await db.collection('users').doc(req.user.id).get();
-    if (!userSnap.exists) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    const userRef = await ensureTutorUserDoc(req);
+    const userSnap = await userRef.get();
     const user = enrichUserProfile(serializeDoc(userSnap));
     const { password_hash: _passwordHash, ...safeUser } = user;
     safeUser.email_verified = req.user.email_verified;
@@ -183,11 +181,7 @@ router.post('/onboarding', auth, async (req, res, next) => {
 
 router.post('/onboarding/decline', auth, async (req, res, next) => {
   try {
-    const userRef = db.collection('users').doc(req.user.id);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-      return res.status(404).json({ message: 'User not found' });
-    }
+    const userRef = await ensureTutorUserDoc(req);
 
     await userRef.update({
       data_consent_accepted: false,
