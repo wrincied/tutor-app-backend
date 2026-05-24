@@ -7,11 +7,27 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
 const { normalizeBillingType, parseNonNegativeInt } = require('../utils/studentBilling');
+const {
+  collectPatchChanges,
+  listActivityLogs,
+  writeActivityLog,
+} = require('../utils/activityLog');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB']);
 
 router.use(auth);
 router.use(requireVerifiedEmail);
+
+router.get('/activity-logs', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const limit = req.query.limit;
+    const items = await listActivityLogs({ tutorId, category: 'students', limit });
+    res.json(items);
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/', async (req, res, next) => {
   try {
@@ -119,7 +135,22 @@ router.post('/', async (req, res, next) => {
     });
 
     const createdSnap = await createdRef.get();
-    res.status(201).json(serializeDoc(createdSnap));
+    const created = serializeDoc(createdSnap);
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.created',
+      entityType: 'student',
+      entityId: created._id,
+      studentName: created.name,
+      metadata: {
+        rate_per_hour: created.rate_per_hour,
+        rate_currency: created.rate_currency,
+        balance_lessons: created.balance_lessons,
+        timezone: created.timezone,
+      },
+    });
+    res.status(201).json(created);
   } catch (error) {
     next(error);
   }
@@ -133,6 +164,7 @@ router.put('/:id', async (req, res, next) => {
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
       return res.status(404).json({ message: 'Student not found' });
     }
+    const before = studentSnap.data();
 
     const {
       name,
@@ -194,7 +226,20 @@ router.put('/:id', async (req, res, next) => {
 
     await studentRef.update(patch);
     const updatedSnap = await studentRef.get();
-    res.json(serializeDoc(updatedSnap));
+    const updated = serializeDoc(updatedSnap);
+    const changes = collectPatchChanges(before, patch);
+    if (changes.length) {
+      await writeActivityLog({
+        tutorId,
+        category: 'students',
+        action: 'student.updated',
+        entityType: 'student',
+        entityId: updated._id,
+        studentName: updated.name,
+        changes,
+      });
+    }
+    res.json(updated);
   } catch (error) {
     next(error);
   }
@@ -208,7 +253,16 @@ router.delete('/:id', async (req, res, next) => {
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
       return res.status(404).json({ message: 'Student not found' });
     }
+    const deleted = studentSnap.data();
     await studentRef.delete();
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.deleted',
+      entityType: 'student',
+      entityId: req.params.id,
+      studentName: deleted.name ?? null,
+    });
     res.json({ message: 'Deleted' });
   } catch (error) {
     next(error);
@@ -228,13 +282,32 @@ router.post('/:id/topup', async (req, res, next) => {
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
       return res.status(404).json({ message: 'Student not found' });
     }
+    const before = studentSnap.data();
+    const rounded = Math.round(lessonsToAdd);
 
     await studentRef.update({
-      balance_lessons: FieldValue.increment(Math.round(lessonsToAdd)),
+      balance_lessons: FieldValue.increment(rounded),
       updatedAt: FieldValue.serverTimestamp(),
     });
     const updatedSnap = await studentRef.get();
-    res.json(serializeDoc(updatedSnap));
+    const updated = serializeDoc(updatedSnap);
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.topup',
+      entityType: 'student',
+      entityId: updated._id,
+      studentName: updated.name,
+      changes: [
+        {
+          field: 'balance_lessons',
+          from: Number(before.balance_lessons) || 0,
+          to: Number(updated.balance_lessons) || 0,
+        },
+      ],
+      metadata: { added: rounded },
+    });
+    res.json(updated);
   } catch (error) {
     next(error);
   }

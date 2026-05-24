@@ -18,6 +18,7 @@ const {
   ratesForReport,
 } = require('../utils/currencyConvert');
 const { computeAustriaSelfEmployedProjection } = require('../utils/financeTax');
+const { collectPatchChanges, listActivityLogs, writeActivityLog } = require('../utils/activityLog');
 
 const COUNTRY_CURRENCY = {
   AT: 'EUR',
@@ -90,6 +91,17 @@ function addIncomeByCurrency(bucket, currency, amount) {
 router.use(auth);
 router.use(requireVerifiedEmail);
 
+router.get('/activity-logs', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const limit = req.query.limit;
+    const items = await listActivityLogs({ tutorId, category: 'finance', limit });
+    res.json(items);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/expenses', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
@@ -144,7 +156,21 @@ router.post('/expenses', async (req, res, next) => {
 
     const ref = await db.collection('expenses').add(doc);
     const created = await ref.get();
-    res.status(201).json(serializeDoc(created));
+    const expense = serializeDoc(created);
+    await writeActivityLog({
+      tutorId,
+      category: 'finance',
+      action: 'expense.created',
+      entityType: 'expense',
+      entityId: expense._id,
+      metadata: {
+        title: expense.title,
+        amount: expense.amount,
+        expense_date: expense.expense_date,
+        category: expense.category ?? '',
+      },
+    });
+    res.status(201).json(expense);
   } catch (error) {
     next(error);
   }
@@ -158,6 +184,7 @@ router.put('/expenses/:id', async (req, res, next) => {
     if (!snap.exists || snap.data().tutor !== tutorId) {
       return res.status(404).json({ message: 'Expense not found' });
     }
+    const before = snap.data();
 
     const patch = { updatedAt: FieldValue.serverTimestamp() };
 
@@ -192,7 +219,21 @@ router.put('/expenses/:id', async (req, res, next) => {
 
     await ref.update(patch);
     const updated = await ref.get();
-    res.json(serializeDoc(updated));
+    const expense = serializeDoc(updated);
+    const expenseFields = ['title', 'amount', 'expense_date', 'category'];
+    const changes = collectPatchChanges(before, patch, expenseFields);
+    if (changes.length) {
+      await writeActivityLog({
+        tutorId,
+        category: 'finance',
+        action: 'expense.updated',
+        entityType: 'expense',
+        entityId: expense._id,
+        changes,
+        metadata: { title: expense.title },
+      });
+    }
+    res.json(expense);
   } catch (error) {
     next(error);
   }
@@ -206,7 +247,20 @@ router.delete('/expenses/:id', async (req, res, next) => {
     if (!snap.exists || snap.data().tutor !== tutorId) {
       return res.status(404).json({ message: 'Expense not found' });
     }
+    const deleted = snap.data();
     await ref.delete();
+    await writeActivityLog({
+      tutorId,
+      category: 'finance',
+      action: 'expense.deleted',
+      entityType: 'expense',
+      entityId: req.params.id,
+      metadata: {
+        title: deleted.title,
+        amount: deleted.amount,
+        expense_date: deleted.expense_date,
+      },
+    });
     res.status(204).send();
   } catch (error) {
     next(error);

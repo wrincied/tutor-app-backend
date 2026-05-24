@@ -151,6 +151,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       applyLessonStatusBilling(batch, {
         tutorId,
         studentId: normalizedStudentId,
+        studentName: studentData.name,
         studentRef,
         lessonRef: createdRef,
         lessonId: createdRef.id,
@@ -297,6 +298,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       applyLessonStatusBilling(batch, {
         tutorId,
         studentId: studentIdForBalance,
+        studentName: studentSnap.data().name,
         studentRef,
         lessonRef,
         lessonId: lessonRef.id,
@@ -365,6 +367,7 @@ router.delete('/:id', async (req, res, next) => {
         appendBalanceLog(batch, {
           tutorId,
           studentId: existing.student_id,
+          studentName: studentSnap.data().name,
           lessonId: lessonRef.id,
           amount: 1,
           reason: 'lesson_deleted_refund',

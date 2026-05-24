@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const { db, FieldValue } = require('../firebase');
 const { normalizeBillingType } = require('./studentBilling');
+const { appendStudentBalanceLog } = require('./activityLog');
 
 const BUFFER_MS = 30 * 60 * 1000;
 const CRON_SCHEDULE = '*/10 * * * *';
@@ -61,7 +62,7 @@ function computeStudentBillingUpdate(student, billingType) {
   };
 }
 
-function appendBalanceLogTx(tx, { tutorId, studentId, lessonId, amount, reason }) {
+function appendBalanceLogTx(tx, { tutorId, studentId, studentName, lessonId, amount, reason }) {
   const logRef = db.collection('balance_logs').doc();
   tx.set(logRef, {
     tutor: tutorId,
@@ -71,6 +72,7 @@ function appendBalanceLogTx(tx, { tutorId, studentId, lessonId, amount, reason }
     reason,
     createdAt: FieldValue.serverTimestamp(),
   });
+  appendStudentBalanceLog(tx, { tutorId, studentId, studentName, lessonId, amount, reason });
 }
 
 async function processLessonInTransaction(lessonId) {
@@ -114,6 +116,7 @@ async function processLessonInTransaction(lessonId) {
     appendBalanceLogTx(tx, {
       tutorId,
       studentId,
+      studentName: student.name,
       lessonId,
       ...billingUpdate.balanceLog,
     });

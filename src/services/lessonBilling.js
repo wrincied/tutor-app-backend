@@ -2,6 +2,7 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const { normalizeLessonStatus, isCompletedStatus } = require('../utils/lessonSnapshot');
 const { normalizeBillingType } = require('../utils/studentBilling');
+const { appendStudentBalanceLog } = require('../utils/activityLog');
 
 function isMissedOrCanceledStatus(status) {
   const s = normalizeLessonStatus(status);
@@ -19,7 +20,7 @@ function balanceLogReason(nextStatus, shouldDeduct, wasDebited) {
   return 'lesson_status_change';
 }
 
-function appendBalanceLog(batch, { tutorId, studentId, lessonId, amount, reason }) {
+function appendBalanceLog(batch, { tutorId, studentId, studentName, lessonId, amount, reason }) {
   const logRef = db.collection('balance_logs').doc();
   batch.set(logRef, {
     tutor: tutorId,
@@ -29,12 +30,13 @@ function appendBalanceLog(batch, { tutorId, studentId, lessonId, amount, reason 
     reason,
     createdAt: FieldValue.serverTimestamp(),
   });
+  appendStudentBalanceLog(batch, { tutorId, studentId, studentName, lessonId, amount, reason });
 }
 
 /**
  * Списание/возврат 1 урока в batch (без commit).
  */
-function applyBalanceDebit(batch, { tutorId, studentRef, lessonRef, studentId, lessonId, reason }) {
+function applyBalanceDebit(batch, { tutorId, studentRef, lessonRef, studentId, studentName, lessonId, reason }) {
   batch.update(studentRef, {
     balance_lessons: FieldValue.increment(-1),
     updatedAt: FieldValue.serverTimestamp(),
@@ -47,13 +49,14 @@ function applyBalanceDebit(batch, { tutorId, studentRef, lessonRef, studentId, l
   appendBalanceLog(batch, {
     tutorId,
     studentId,
+    studentName,
     lessonId,
     amount: -1,
     reason,
   });
 }
 
-function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, lessonId, reason }) {
+function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, studentName, lessonId, reason }) {
   batch.update(studentRef, {
     balance_lessons: FieldValue.increment(1),
     updatedAt: FieldValue.serverTimestamp(),
@@ -66,6 +69,7 @@ function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, 
   appendBalanceLog(batch, {
     tutorId,
     studentId,
+    studentName,
     lessonId,
     amount: 1,
     reason,
@@ -78,6 +82,7 @@ function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, 
 function applyLessonStatusBilling(batch, {
   tutorId,
   studentId,
+  studentName,
   studentRef,
   lessonRef,
   lessonId,
@@ -125,6 +130,7 @@ function applyLessonStatusBilling(batch, {
           studentRef,
           lessonRef,
           studentId,
+          studentName,
           lessonId,
           reason: balanceLogReason(nextStatus, true, false),
         });
@@ -138,6 +144,7 @@ function applyLessonStatusBilling(batch, {
         studentRef,
         lessonRef,
         studentId,
+        studentName,
         lessonId,
         reason: balanceLogReason(nextStatus, false, true),
       });
@@ -154,6 +161,7 @@ function applyLessonStatusBilling(batch, {
           studentRef,
           lessonRef,
           studentId,
+          studentName,
           lessonId,
           reason: 'lesson_uncompleted_refund',
         });
@@ -172,6 +180,7 @@ function applyLessonStatusBilling(batch, {
       appendBalanceLog(batch, {
         tutorId,
         studentId,
+        studentName,
         lessonId,
         amount: -1,
         reason: 'lesson_uncompleted_postpaid_reversal',
@@ -234,6 +243,7 @@ async function cancelLessonWithBilling({
   applyLessonStatusBilling(batch, {
     tutorId,
     studentId: resolvedStudentId,
+    studentName: studentSnap.data().name,
     studentRef,
     lessonRef,
     lessonId,
