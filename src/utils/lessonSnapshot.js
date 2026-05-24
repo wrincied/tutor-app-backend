@@ -42,6 +42,10 @@ function normalizeLessonStatus(status) {
   return 'scheduled';
 }
 
+function isCompletedStatus(status) {
+  return normalizeLessonStatus(status) === 'completed';
+}
+
 /** Выручка по снапшоту (ставка × часы или legacy lesson_rate), без фильтра по статусу. */
 function lessonRevenueFromSnapshot(lessonData) {
   const durationMinutes = Number(lessonData.lesson_duration ?? 60);
@@ -105,6 +109,7 @@ module.exports = {
   priceSnapshotFromStudent,
   studentSnapshotFromStudent,
   normalizeLessonStatus,
+  isCompletedStatus,
   lessonRevenueFromSnapshot,
   lessonIncomeFromSnapshot,
   lessonScheduledRevenueFromSnapshot,

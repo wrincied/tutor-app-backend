@@ -1,5 +1,7 @@
 const express = require('express');
 const auth = require('../middleware/auth');
+const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
+const billingAuth = [auth, requireVerifiedEmail];
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const {
@@ -7,6 +9,10 @@ const {
   enrichUserProfile,
   subscriptionLabel,
 } = require('../utils/userProfile');
+const {
+  getSubscriptionPricing,
+  getStripePriceIdForCountry,
+} = require('../utils/subscriptionPricing');
 
 const router = express.Router();
 
@@ -28,7 +34,7 @@ async function loadUser(userId) {
 }
 
 /** POST /api/billing/checkout-session — Stripe Checkout (только при настроенном налоговом режиме). */
-router.post('/checkout-session', auth, async (req, res, next) => {
+router.post('/checkout-session', billingAuth, async (req, res, next) => {
   try {
     const user = await loadUser(req.user.id);
     if (!user) {
@@ -42,12 +48,16 @@ router.post('/checkout-session', auth, async (req, res, next) => {
     }
 
     const stripe = getStripe();
-    const priceId = process.env.STRIPE_PRICE_ID_PRO;
+    const pricingCountry = user.country_settings;
+    const pricing = getSubscriptionPricing(pricingCountry);
+    const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
+    const priceId = getStripePriceIdForCountry(pricingCountry, interval);
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
 
     if (!stripe || !priceId) {
       return res.status(503).json({
-        message: 'Stripe is not configured (STRIPE_SECRET_KEY, STRIPE_PRICE_ID_PRO)',
+        message:
+          'Stripe is not configured (STRIPE_SECRET_KEY, STRIPE_PRICE_ID_PRO or STRIPE_PRICE_ID_PRO_XX)',
       });
     }
 
@@ -55,15 +65,18 @@ router.post('/checkout-session', auth, async (req, res, next) => {
       mode: 'subscription',
       customer_email: user.email,
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${frontendUrl}/app/account?billing=success`,
-      cancel_url: `${frontendUrl}/app/account?billing=cancel`,
+      success_url: `${frontendUrl}/app/pricing?billing=success`,
+      cancel_url: `${frontendUrl}/app/pricing?billing=cancel`,
       metadata: {
         userId: req.user.id,
         plan: 'pro',
+        interval,
+        pricingCountry,
+        pricingCurrency: pricing.currency,
       },
     });
 
-    res.json({ url: session.url });
+    res.json({ url: session.url, pricing });
   } catch (error) {
     next(error);
   }
@@ -74,7 +87,7 @@ router.post('/checkout-session', auth, async (req, res, next) => {
  * Ручное подтверждение оплаты (прод: только с BILLING_ADMIN_SECRET).
  * Body: { plan: 'pro' | 'trial', adminSecret: string }
  */
-router.post('/confirm-payment', auth, async (req, res, next) => {
+router.post('/confirm-payment', billingAuth, async (req, res, next) => {
   try {
     const adminSecret = process.env.BILLING_ADMIN_SECRET;
     if (!adminSecret || String(req.body.adminSecret) !== adminSecret) {

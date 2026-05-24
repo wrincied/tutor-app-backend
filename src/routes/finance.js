@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const auth = require('../middleware/auth');
+const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const {
@@ -10,6 +11,13 @@ const {
   lessonScheduledRevenueFromSnapshot,
   normalizeLessonStatus,
 } = require('../utils/lessonSnapshot');
+const {
+  convertAmount,
+  getExchangeRates,
+  normalizeCurrency,
+  ratesForReport,
+} = require('../utils/currencyConvert');
+const { computeAustriaSelfEmployedProjection } = require('../utils/financeTax');
 
 const COUNTRY_CURRENCY = {
   AT: 'EUR',
@@ -20,33 +28,6 @@ const COUNTRY_CURRENCY = {
   KZ: 'KZT',
   US: 'USD',
 };
-
-function austrianIncomeTax(taxBase) {
-  const brackets = [
-    { limit: 12816, rate: 0.0 },
-    { limit: 20818, rate: 0.2 },
-    { limit: 34513, rate: 0.3 },
-    { limit: 66612, rate: 0.41 },
-    { limit: 99266, rate: 0.48 },
-    { limit: Infinity, rate: 0.5 },
-  ];
-  let tax = 0;
-  let previousLimit = 0;
-  let rest = Math.max(0, taxBase);
-
-  for (const bracket of brackets) {
-    if (rest <= 0) {
-      break;
-    }
-    const segmentCap = bracket.limit - previousLimit;
-    const segment = Math.min(rest, segmentCap);
-    tax += segment * bracket.rate;
-    rest -= segment;
-    previousLimit = bracket.limit;
-  }
-
-  return tax;
-}
 
 function parseDateQuery(value) {
   if (!value || typeof value !== 'string') {
@@ -107,6 +88,7 @@ function addIncomeByCurrency(bucket, currency, amount) {
 }
 
 router.use(auth);
+router.use(requireVerifiedEmail);
 
 router.get('/expenses', async (req, res, next) => {
   try {
@@ -256,7 +238,19 @@ router.get('/summary', async (req, res, next) => {
     const userData = userSnap.exists ? userSnap.data() : {};
     const country = String(userData.country_settings ?? 'AT').toUpperCase();
     const taxMode = String(userData.tax_mode ?? 'none');
-    const currency = COUNTRY_CURRENCY[country] ?? 'EUR';
+    const defaultCurrency = COUNTRY_CURRENCY[country] ?? 'EUR';
+    const reportCurrency =
+      req.query.currency && typeof req.query.currency === 'string'
+        ? normalizeCurrency(req.query.currency)
+        : defaultCurrency;
+    const { rates: eurRates, date: ratesDate, source: ratesSource } = await getExchangeRates();
+    const exchangeRatesMeta = {
+      base: 'EUR',
+      reportCurrency,
+      asOf: ratesDate,
+      source: ratesSource,
+      rates: ratesForReport(eurRates),
+    };
 
     let totalIncome = 0;
     let scheduledIncome = 0;
@@ -297,14 +291,17 @@ router.get('/summary', async (req, res, next) => {
 
       const earned = lessonIncomeFromSnapshot(data);
       const planned = lessonScheduledRevenueFromSnapshot(data);
-      totalIncome += earned;
-      scheduledIncome += planned;
+      const lessonCurrency = normalizeCurrency(data.lesson_currency);
+      const earnedReport = convertAmount(earned, lessonCurrency, reportCurrency, eurRates);
+      const plannedReport = convertAmount(planned, lessonCurrency, reportCurrency, eurRates);
+      totalIncome += earnedReport;
+      scheduledIncome += plannedReport;
 
       if (earned > 0) {
-        addIncomeByCurrency(incomeByCurrency, data.lesson_currency, earned);
+        addIncomeByCurrency(incomeByCurrency, lessonCurrency, earned);
       }
       if (planned > 0) {
-        addIncomeByCurrency(scheduledByCurrency, data.lesson_currency, planned);
+        addIncomeByCurrency(scheduledByCurrency, lessonCurrency, planned);
       }
     }
 
@@ -317,40 +314,34 @@ router.get('/summary', async (req, res, next) => {
       }
       expenseCount += 1;
       const amount = Number(data.amount);
-      totalExpenses += Number.isNaN(amount) ? 0 : amount;
+      const raw = Number.isNaN(amount) ? 0 : amount;
+      totalExpenses += convertAmount(raw, defaultCurrency, reportCurrency, eurRates);
     });
 
     const combinedIncome = totalIncome + scheduledIncome;
-    const combinedByCurrency = { ...scheduledByCurrency };
-    for (const [code, amount] of Object.entries(incomeByCurrency)) {
-      combinedByCurrency[code] = (combinedByCurrency[code] ?? 0) + amount;
+    const combinedByCurrency = {};
+    for (const code of new Set([
+      ...Object.keys(incomeByCurrency),
+      ...Object.keys(scheduledByCurrency),
+    ])) {
+      const raw =
+        (incomeByCurrency[code] ?? 0) + (scheduledByCurrency[code] ?? 0);
+      combinedByCurrency[code] = convertAmount(raw, code, reportCurrency, eurRates);
     }
 
     const grossProfit = totalIncome - totalExpenses;
-
-    const socialInsuranceRate = 0.1812;
-    const socialInsurance = Math.max(0, grossProfit) * socialInsuranceRate;
-    const taxableBase = Math.max(0, grossProfit - socialInsurance);
-    const incomeTax = austrianIncomeTax(taxableBase);
-    const netProfit = grossProfit - socialInsurance - incomeTax;
-
-    const monthlyEquivalentGross = Math.max(0, totalIncome / 12);
-    const annualGross14 = monthlyEquivalentGross * 14;
-    const annualSpecialSalary = monthlyEquivalentGross * 2;
-    const annualRegularSalary = monthlyEquivalentGross * 12;
-    const estimatedSpecialSalaryTax = annualSpecialSalary * 0.06;
-    const estimatedRegularTax = austrianIncomeTax(annualRegularSalary);
-    const annualEmployeeNetEstimate =
-      annualGross14 - estimatedSpecialSalaryTax - estimatedRegularTax;
+    const austriaProjection = computeAustriaSelfEmployedProjection(grossProfit);
 
     res.json({
-      currency,
+      currency: reportCurrency,
+      defaultCurrency,
       country,
       tax_mode: taxMode,
       period: {
         from: from ? from.toISOString().slice(0, 10) : null,
         to: to ? to.toISOString().slice(0, 10) : null,
       },
+      exchangeRates: exchangeRatesMeta,
       totals: {
         lessonCount,
         scheduledLessonCount,
@@ -372,26 +363,7 @@ router.get('/summary', async (req, res, next) => {
         scheduledByCurrency,
         combinedByCurrency,
       },
-      austria:
-        taxMode === 'at-self-employed'
-          ? {
-              socialInsuranceRate,
-              socialInsurance,
-              taxableBase,
-              incomeTax,
-              netProfit,
-            }
-          : null,
-      salaryModel13_14:
-        taxMode === 'at-self-employed'
-          ? {
-              monthlyEquivalentGross,
-              annualGross14,
-              annualEmployeeNetEstimate,
-              estimatedRegularTax,
-              estimatedSpecialSalaryTax,
-            }
-          : null,
+      austria: taxMode === 'at-self-employed' ? austriaProjection : null,
     });
   } catch (error) {
     next(error);

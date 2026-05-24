@@ -1,6 +1,4 @@
 const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 const auth = require('../middleware/auth');
@@ -12,94 +10,55 @@ const {
   assertConfigurableTaxMode,
   normalizeTaxMode,
 } = require('../utils/userProfile');
+const { DEFAULT_COUNTRY, normalizeCountryCode } = require('../utils/subscriptionPricing');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
-const DEFAULT_COUNTRY = 'AT';
 
-function makeToken(userId) {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '30d' });
-}
+async function ensureTutorUserDoc(req) {
+  const uid = req.user.id;
+  const email = String(req.user.email || '').trim().toLowerCase();
+  const userRef = db.collection('users').doc(uid);
+  const userSnap = await userRef.get();
 
-router.post('/register', async (req, res, next) => {
-  try {
-    const { email, password, timezone, country_settings } = req.body;
-    const normalizedEmail = String(email || '').trim().toLowerCase();
-    if (!normalizedEmail || !password) {
-      return res.status(400).json({ message: 'email and password are required' });
-    }
-    if (String(password).length < 6) {
-      return res.status(400).json({ message: 'password must be at least 6 characters' });
-    }
-
-    const existing = await db.collection('users').where('email', '==', normalizedEmail).limit(1).get();
-    if (!existing.empty) {
-      return res.status(409).json({ message: 'User with this email already exists' });
-    }
-
-    const passwordHash = await bcrypt.hash(String(password), 10);
-    const createdRef = await db.collection('users').add({
-      email: normalizedEmail,
-      password_hash: passwordHash,
-      country_settings: country_settings || DEFAULT_COUNTRY,
+  if (!userSnap.exists) {
+    await userRef.set({
+      email,
+      firebase_uid: uid,
+      email_verified: req.user.email_verified,
+      first_name: '',
+      last_name: '',
+      name: '',
+      country_settings: DEFAULT_COUNTRY,
       tax_mode: 'none',
-      timezone: timezone || DEFAULT_TIMEZONE,
+      timezone: DEFAULT_TIMEZONE,
       subscription_status: 'free',
+      role: 'tutor',
+      onboarding_completed: false,
+      data_consent_accepted: null,
+      marketing_cookies_accepted: null,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
-
-    const createdSnap = await createdRef.get();
-    const user = serializeDoc(createdSnap);
-    const token = makeToken(user._id);
-
-    res.status(201).json({
-      token,
-      user: {
-        id: user._id,
-        email: user.email,
-        country_settings: user.country_settings,
-        tax_mode: user.tax_mode,
-        timezone: user.timezone,
-        subscription_status: user.subscription_status,
-      },
+  } else {
+    await userRef.update({
+      email,
+      email_verified: req.user.email_verified,
+      updatedAt: FieldValue.serverTimestamp(),
     });
-  } catch (error) {
-    next(error);
   }
-});
 
-router.post('/login', async (req, res, next) => {
+  return userRef;
+}
+
+/** Создаёт или обновляет профиль репетитора в Firestore (документ id = Firebase UID). */
+router.post('/bootstrap', auth, async (req, res, next) => {
   try {
-    const normalizedEmail = String(req.body.email || '').trim().toLowerCase();
-    const password = String(req.body.password || '');
-    if (!normalizedEmail || !password) {
-      return res.status(400).json({ message: 'email and password are required' });
-    }
-
-    const snap = await db.collection('users').where('email', '==', normalizedEmail).limit(1).get();
-    if (snap.empty) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    const doc = snap.docs[0];
-    const userData = doc.data();
-    const isValidPassword = await bcrypt.compare(password, userData.password_hash || '');
-    if (!isValidPassword) {
-      return res.status(401).json({ message: 'Invalid email or password' });
-    }
-
-    const token = makeToken(doc.id);
-    res.json({
-      token,
-      user: {
-        id: doc.id,
-        email: userData.email,
-        country_settings: userData.country_settings,
-        tax_mode: userData.tax_mode,
-        timezone: userData.timezone,
-        subscription_status: userData.subscription_status,
-      },
-    });
+    const userRef = await ensureTutorUserDoc(req);
+    const updatedSnap = await userRef.get();
+    const user = enrichUserProfile(serializeDoc(updatedSnap));
+    const { password_hash: _ph, ...safeUser } = user;
+    safeUser.email_verified = req.user.email_verified;
+    res.json(safeUser);
   } catch (error) {
     next(error);
   }
@@ -113,6 +72,7 @@ router.get('/me', auth, async (req, res, next) => {
     }
     const user = enrichUserProfile(serializeDoc(userSnap));
     const { password_hash: _passwordHash, ...safeUser } = user;
+    safeUser.email_verified = req.user.email_verified;
     res.json(safeUser);
   } catch (error) {
     next(error);
@@ -128,49 +88,18 @@ router.put('/me', auth, async (req, res, next) => {
     }
 
     const userData = userSnap.data();
-    const {
-      email,
-      currentPassword,
-      newPassword,
-      country_settings,
-      tax_mode,
-      timezone,
-    } = req.body;
-
-    const needsPasswordCheck =
-      (email && String(email).trim().toLowerCase() !== userData.email) ||
-      (newPassword && String(newPassword).length > 0);
-
-    if (needsPasswordCheck) {
-      if (!currentPassword) {
-        return res.status(400).json({ message: 'Current password is required' });
-      }
-      const valid = await bcrypt.compare(String(currentPassword), userData.password_hash || '');
-      if (!valid) {
-        return res.status(401).json({ message: 'Invalid current password' });
-      }
-    }
+    const { name, first_name, last_name, tax_mode, timezone } = req.body;
 
     const patch = { updatedAt: FieldValue.serverTimestamp() };
 
-    if (email) {
-      const normalized = String(email).trim().toLowerCase();
-      const existing = await db.collection('users').where('email', '==', normalized).limit(1).get();
-      if (!existing.empty && existing.docs[0].id !== req.user.id) {
-        return res.status(409).json({ message: 'User with this email already exists' });
-      }
-      patch.email = normalized;
-    }
-
-    if (newPassword) {
-      if (String(newPassword).length < 6) {
-        return res.status(400).json({ message: 'Password must be at least 6 characters' });
-      }
-      patch.password_hash = await bcrypt.hash(String(newPassword), 10);
-    }
-
-    if (country_settings !== undefined) {
-      patch.country_settings = String(country_settings);
+    if (first_name !== undefined || last_name !== undefined) {
+      const first = String(first_name ?? userData.first_name ?? '').trim().slice(0, 60);
+      const last = String(last_name ?? userData.last_name ?? '').trim().slice(0, 60);
+      patch.first_name = first;
+      patch.last_name = last;
+      patch.name = `${first} ${last}`.trim().slice(0, 120);
+    } else if (name !== undefined) {
+      patch.name = String(name).trim().slice(0, 120);
     }
     if (tax_mode !== undefined) {
       const currentTax = normalizeTaxMode(userData.tax_mode);
@@ -194,7 +123,80 @@ router.put('/me', auth, async (req, res, next) => {
     const updatedSnap = await userRef.get();
     const user = enrichUserProfile(serializeDoc(updatedSnap));
     const { password_hash: _ph, ...safeUser } = user;
+    safeUser.email_verified = req.user.email_verified;
     res.json(safeUser);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/onboarding', auth, async (req, res, next) => {
+  try {
+    const userRef = await ensureTutorUserDoc(req);
+
+    const {
+      first_name,
+      last_name,
+      country_settings,
+      data_consent_accepted,
+      marketing_cookies_accepted,
+    } = req.body;
+
+    if (!data_consent_accepted) {
+      return res.status(400).json({ message: 'Data processing consent is required' });
+    }
+
+    const first = String(first_name ?? '').trim().slice(0, 60);
+    const last = String(last_name ?? '').trim().slice(0, 60);
+    if (!first) {
+      return res.status(400).json({ message: 'First name is required' });
+    }
+
+    const country = normalizeCountryCode(country_settings);
+    if (!country) {
+      return res.status(400).json({ message: 'Unsupported country code' });
+    }
+
+    const now = FieldValue.serverTimestamp();
+    await userRef.update({
+      first_name: first,
+      last_name: last,
+      name: `${first} ${last}`.trim().slice(0, 120),
+      country_settings: country,
+      data_consent_accepted: true,
+      data_consent_at: now,
+      marketing_cookies_accepted: marketing_cookies_accepted === true,
+      marketing_cookies_at: now,
+      onboarding_completed: true,
+      updatedAt: now,
+    });
+
+    const updatedSnap = await userRef.get();
+    const user = enrichUserProfile(serializeDoc(updatedSnap));
+    const { password_hash: _ph, ...safeUser } = user;
+    safeUser.email_verified = req.user.email_verified;
+    res.json(safeUser);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/onboarding/decline', auth, async (req, res, next) => {
+  try {
+    const userRef = db.collection('users').doc(req.user.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await userRef.update({
+      data_consent_accepted: false,
+      data_consent_at: FieldValue.serverTimestamp(),
+      onboarding_completed: false,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }

@@ -2,13 +2,16 @@ const express = require('express');
 const router = express.Router();
 
 const auth = require('../middleware/auth');
+const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
+const { normalizeBillingType, parseNonNegativeInt } = require('../utils/studentBilling');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB']);
 
 router.use(auth);
+router.use(requireVerifiedEmail);
 
 router.get('/', async (req, res, next) => {
   try {
@@ -58,7 +61,16 @@ router.get('/:id', async (req, res, next) => {
 router.post('/', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
-    const { name, rate_per_hour, rate_currency, timezone, color_hex } = req.body;
+    const {
+      name,
+      rate_per_hour,
+      rate_currency,
+      timezone,
+      color_hex,
+      billing_type,
+      balance_lessons,
+      credit_limit,
+    } = req.body;
 
     const normalizedName = name ? String(name).trim() : '';
     if (!normalizedName) {
@@ -83,13 +95,22 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    const billingType = normalizeBillingType(billing_type);
+    const initialBalance =
+      billingType === 'package' ? parseNonNegativeInt(balance_lessons, 0) : 0;
+    const initialCreditLimit =
+      billingType === 'postpaid' ? parseNonNegativeInt(credit_limit, 0) : 0;
+
     const createdRef = await db.collection('students').add({
       tutor_id: tutorId,
       name: normalizedName,
       rate_per_hour: ratePerHour,
       rate_currency: currency,
       color_hex: studentColor,
-      balance_lessons: 0,
+      balance_lessons: initialBalance,
+      billing_type: billingType,
+      credit_limit: initialCreditLimit,
+      unpaid_lessons_count: 0,
       auto_debit_enabled: true,
       bot_active: false,
       timezone: timezone ? String(timezone) : 'Europe/Vienna',
@@ -120,6 +141,8 @@ router.put('/:id', async (req, res, next) => {
       timezone,
       auto_debit_enabled,
       balance_lessons,
+      billing_type,
+      credit_limit,
       color_hex,
       bot_active,
     } = req.body;
@@ -146,12 +169,14 @@ router.put('/:id', async (req, res, next) => {
     if (auto_debit_enabled !== undefined) {
       patch.auto_debit_enabled = Boolean(auto_debit_enabled);
     }
+    if (billing_type !== undefined) {
+      patch.billing_type = normalizeBillingType(billing_type);
+    }
     if (balance_lessons !== undefined) {
-      const parsed = Number(balance_lessons);
-      if (Number.isNaN(parsed)) {
-        return res.status(400).json({ message: 'balance_lessons must be a number' });
-      }
-      patch.balance_lessons = Math.round(parsed);
+      patch.balance_lessons = parseNonNegativeInt(balance_lessons, 0);
+    }
+    if (credit_limit !== undefined) {
+      patch.credit_limit = parseNonNegativeInt(credit_limit, 0);
     }
     if (color_hex !== undefined) {
       const normalized = String(color_hex).trim();

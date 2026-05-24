@@ -1,6 +1,6 @@
-const jwt = require('jsonwebtoken');
+const { admin } = require('../firebase');
 
-const auth = (req, res, next) => {
+async function auth(req, res, next) {
   const header = req.headers.authorization;
 
   if (!header || !header.startsWith('Bearer ')) {
@@ -10,12 +10,16 @@ const auth = (req, res, next) => {
   const token = header.split(' ')[1];
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = { id: payload.id };
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.user = {
+      id: decoded.uid,
+      email: decoded.email || null,
+      email_verified: decoded.email_verified === true,
+    };
     next();
-  } catch (err) {
+  } catch (_err) {
     return res.status(401).json({ message: 'Токен недействителен или истёк' });
   }
-};
+}
 
 module.exports = auth;

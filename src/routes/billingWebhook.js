@@ -13,6 +13,24 @@ function getStripe() {
   return require('stripe')(key);
 }
 
+async function resolveCardCountry(stripe, session) {
+  try {
+    const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
+      expand: ['payment_intent.payment_method'],
+    });
+    let paymentMethod = fullSession.payment_intent?.payment_method;
+    if (!paymentMethod) {
+      return null;
+    }
+    if (typeof paymentMethod === 'string') {
+      paymentMethod = await stripe.paymentMethods.retrieve(paymentMethod);
+    }
+    return normalizeCountryCode(paymentMethod.card?.country);
+  } catch {
+    return null;
+  }
+}
+
 router.post('/', express.raw({ type: 'application/json' }), async (req, res, next) => {
   try {
     const stripe = getStripe();

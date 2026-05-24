@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const auth = require('../middleware/auth');
+const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const checkLessonCollision = require('../middleware/lessonCollision');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
@@ -9,6 +10,14 @@ const {
   studentSnapshotFromStudent,
   enrichLessonSnapshot,
 } = require('../utils/lessonSnapshot');
+const {
+  applyLessonStatusBilling,
+  applyLessonBalanceOnCreate,
+  appendBalanceLog,
+  isCompletedStatus,
+  isMissedOrCanceledStatus,
+  cancelLessonWithBilling,
+} = require('../services/lessonBilling');
 
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
 
@@ -36,6 +45,7 @@ async function ensureStudentOwned(studentId, tutorId) {
 }
 
 router.use(auth);
+router.use(requireVerifiedEmail);
 
 router.get('/', async (req, res, next) => {
   try {
@@ -103,7 +113,20 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
     const normalizedStatus = ALLOWED_STATUS.has(status) ? status : 'scheduled';
     const normalizedDuration = clampDuration(lesson_duration);
 
-    const createdRef = await db.collection('lessons').add({
+    if (
+      isMissedOrCanceledStatus(normalizedStatus) &&
+      !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
+    ) {
+      return res.status(400).json({
+        message: 'should_deduct_balance is required when status is missed or canceled',
+      });
+    }
+    const shouldDeductOnCreate = req.body.should_deduct_balance === true;
+
+    const studentRef = db.collection('students').doc(normalizedStudentId);
+    const createdRef = db.collection('lessons').doc();
+
+    const lessonData = {
       tutor: tutorId,
       student_id: normalizedStudentId,
       student_name: studentData.name || null,
@@ -116,9 +139,37 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       notes: notes ? String(notes).trim() : '',
       scheduledAt: scheduledAt ? String(scheduledAt) : null,
       reminder_sent: false,
+      balance_debited: false,
+      billing_processed: false,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+
+    const batch = db.batch();
+    batch.set(createdRef, lessonData);
+    if (isMissedOrCanceledStatus(normalizedStatus)) {
+      applyLessonStatusBilling(batch, {
+        tutorId,
+        studentId: normalizedStudentId,
+        studentRef,
+        lessonRef: createdRef,
+        lessonId: createdRef.id,
+        previousStatus: 'scheduled',
+        nextStatus: normalizedStatus,
+        balanceDebited: false,
+        billingProcessed: false,
+        studentBillingType: studentData.billing_type,
+        shouldDeduct: shouldDeductOnCreate,
+        autoDebitEnabled: studentData.auto_debit_enabled !== false,
+      });
+    } else {
+      applyLessonBalanceOnCreate(batch, {
+        lessonRef: createdRef,
+        status: normalizedStatus,
+        autoDebitEnabled: studentData.auto_debit_enabled !== false,
+      });
+    }
+    await batch.commit();
 
     const createdSnap = await createdRef.get();
     res.status(201).json(serializeDoc(createdSnap));
@@ -203,10 +254,89 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       patch.reminder_sent = false;
     }
 
-    await lessonRef.update(patch);
+    const nextStatus = patch.status ?? existing.status;
+    const studentIdForBalance = patch.student_id ?? existing.student_id;
+    const statusChangingToMissedCanceled =
+      status !== undefined &&
+      isMissedOrCanceledStatus(nextStatus) &&
+      !isMissedOrCanceledStatus(existing.status);
+
+    if (
+      statusChangingToMissedCanceled &&
+      !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
+    ) {
+      return res.status(400).json({
+        message: 'should_deduct_balance is required when status is missed or canceled',
+      });
+    }
+
+    const shouldDeduct = req.body.should_deduct_balance === true;
+
+    let studentRef = null;
+    let studentSnap = null;
+    if (studentIdForBalance) {
+      studentRef = db.collection('students').doc(studentIdForBalance);
+      studentSnap = await studentRef.get();
+      if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+        return res.status(400).json({ message: 'Student not found' });
+      }
+      if (
+        isCompletedStatus(nextStatus) &&
+        studentSnap.data().auto_debit_enabled === false &&
+        !isCompletedStatus(existing.status)
+      ) {
+        return res.status(400).json({
+          message: 'Auto debit is disabled for this student',
+        });
+      }
+    }
+
+    const batch = db.batch();
+    batch.update(lessonRef, patch);
+    if (studentRef && studentSnap) {
+      applyLessonStatusBilling(batch, {
+        tutorId,
+        studentId: studentIdForBalance,
+        studentRef,
+        lessonRef,
+        lessonId: lessonRef.id,
+        previousStatus: existing.status,
+        nextStatus,
+        balanceDebited: existing.balance_debited,
+        billingProcessed: existing.billing_processed,
+        studentBillingType: studentSnap.data().billing_type,
+        shouldDeduct,
+        autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
+      });
+    }
+    await batch.commit();
+
     const updatedSnap = await lessonRef.get();
     res.json(serializeDoc(updatedSnap));
   } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:id/cancel-with-billing', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const { status, should_deduct_balance, student_id } = req.body;
+    if (!status || !isMissedOrCanceledStatus(status)) {
+      return res.status(400).json({ message: 'status must be missed or canceled' });
+    }
+    const result = await cancelLessonWithBilling({
+      tutorId,
+      lessonId: req.params.id,
+      studentId: student_id,
+      nextStatus: status,
+      shouldDeduct: should_deduct_balance === true,
+    });
+    res.json(result);
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     next(error);
   }
 });
@@ -220,7 +350,29 @@ router.delete('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Lesson not found' });
     }
 
-    await lessonRef.delete();
+    const existing = lessonSnap.data();
+    const batch = db.batch();
+    batch.delete(lessonRef);
+
+    if (existing.student_id && existing.balance_debited) {
+      const studentRef = db.collection('students').doc(existing.student_id);
+      const studentSnap = await studentRef.get();
+      if (studentSnap.exists && studentSnap.data().tutor_id === tutorId) {
+        batch.update(studentRef, {
+          balance_lessons: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        appendBalanceLog(batch, {
+          tutorId,
+          studentId: existing.student_id,
+          lessonId: lessonRef.id,
+          amount: 1,
+          reason: 'lesson_deleted_refund',
+        });
+      }
+    }
+
+    await batch.commit();
     res.status(204).send();
   } catch (error) {
     next(error);

@@ -1,0 +1,10 @@
+# Firebase App Hosting — Node.js API (tutor-app-backend)
+# https://tutor-app-backend--tutorassis.europe-west4.hosted.app
+runConfig:
+  minInstances: 0
+  maxInstances: 10
+  concurrency: 80
+  cpu: 1
+  memoryMiB: 512
+
+# Секреты (JWT, Stripe, Firebase SA) задайте в Firebase Console → App Hosting → Environment.
