@@ -10,6 +10,61 @@ const { getSubscriptionPricing } = require('../utils/subscriptionPricing');
 
 const TRIAL_GIFT_DAYS = 14;
 
+function defaultTrialEndsAt(from = new Date()) {
+  const ends = new Date(from);
+  ends.setUTCDate(ends.getUTCDate() + TRIAL_GIFT_DAYS);
+  ends.setUTCHours(23, 59, 59, 999);
+  return ends;
+}
+
+function parseTrialEndsAt(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const parsed = new Date(`${trimmed}T23:59:59.999Z`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function buildSubscriptionPatch(statusRaw, trialEndsAtRaw) {
+  const status = subscriptionLabel(statusRaw);
+  if (status !== 'free' && status !== 'pro' && status !== 'trial') {
+    return { ok: false, message: 'subscription_status must be free, pro, or trial' };
+  }
+
+  const patch = {
+    subscription_status: status,
+    subscription_updated_at: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  };
+
+  if (status === 'trial') {
+    const trialEndsAt = parseTrialEndsAt(trialEndsAtRaw) ?? defaultTrialEndsAt();
+    patch.trial_ends_at = trialEndsAt;
+  } else {
+    patch.trial_ends_at = FieldValue.delete();
+  }
+
+  return { ok: true, patch };
+}
+
+function adminUserRow(doc) {
+  const raw = serializeDoc(doc);
+  const enriched = enrichUserProfile(raw);
+  return {
+    _id: enriched._id,
+    email: enriched.email || '',
+    subscription_status: enriched.subscription_status,
+    trial_ends_at: raw.trial_ends_at ?? null,
+    createdAt: raw.createdAt ?? null,
+    role: enriched.role,
+  };
+}
+
 router.use(auth, requireSuperAdmin);
 
 router.get('/stats', async (req, res, next) => {
@@ -57,19 +112,28 @@ router.get('/users', async (req, res, next) => {
       snap = await db.collection('users').limit(500).get();
     }
 
-    const users = snap.docs.map((doc) => {
-      const raw = serializeDoc(doc);
-      const enriched = enrichUserProfile(raw);
-      return {
-        _id: enriched._id,
-        email: enriched.email || '',
-        subscription_status: enriched.subscription_status,
-        createdAt: raw.createdAt ?? null,
-        role: enriched.role,
-      };
-    });
+    res.json(snap.docs.map((doc) => adminUserRow(doc)));
+  } catch (error) {
+    next(error);
+  }
+});
 
-    res.json(users);
+router.put('/users/:id/subscription', async (req, res, next) => {
+  try {
+    const userRef = db.collection('users').doc(req.params.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const built = buildSubscriptionPatch(req.body?.subscription_status, req.body?.trial_ends_at);
+    if (!built.ok) {
+      return res.status(400).json({ message: built.message });
+    }
+
+    await userRef.update(built.patch);
+    const updated = adminUserRow(await userRef.get());
+    res.json({ ok: true, user: updated });
   } catch (error) {
     next(error);
   }
@@ -83,26 +147,14 @@ router.post('/users/:id/grant-trial', async (req, res, next) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const trialEndsAt = new Date();
-    trialEndsAt.setUTCDate(trialEndsAt.getUTCDate() + TRIAL_GIFT_DAYS);
+    const built = buildSubscriptionPatch('trial', req.body?.trial_ends_at);
+    await userRef.update(built.patch);
 
-    await userRef.update({
-      subscription_status: 'trial',
-      trial_ends_at: trialEndsAt,
-      subscription_updated_at: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-
-    const updated = enrichUserProfile(serializeDoc(await userRef.get()));
+    const updated = adminUserRow(await userRef.get());
     res.json({
       ok: true,
       days: TRIAL_GIFT_DAYS,
-      user: {
-        _id: updated._id,
-        email: updated.email,
-        subscription_status: updated.subscription_status,
-        trial_ends_at: updated.trial_ends_at ?? trialEndsAt.toISOString(),
-      },
+      user: updated,
     });
   } catch (error) {
     next(error);
