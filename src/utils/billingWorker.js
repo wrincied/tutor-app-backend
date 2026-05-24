@@ -2,8 +2,13 @@ const cron = require('node-cron');
 const { db, FieldValue } = require('../firebase');
 const { normalizeBillingType } = require('./studentBilling');
 const { appendStudentBalanceLog } = require('./activityLog');
+const { LESSON_BILLING_BUFFER_MS } = require('./lessonBillingConstants');
+const {
+  autoCompletePastRecurringOccurrences,
+  billDueRecurringOccurrences,
+} = require('../services/lessonOccurrence');
 
-const BUFFER_MS = 30 * 60 * 1000;
+const BUFFER_MS = LESSON_BILLING_BUFFER_MS;
 const CRON_SCHEDULE = '*/10 * * * *';
 
 function completedAtMs(lesson) {
@@ -139,8 +144,49 @@ async function processLessonInTransaction(lessonId) {
   });
 }
 
+function lessonEndMs(lesson) {
+  const start = Date.parse(String(lesson.scheduledAt));
+  if (Number.isNaN(start)) {
+    return null;
+  }
+  const duration = Number(lesson.lesson_duration) || 60;
+  return start + duration * 60_000;
+}
+
+/** Авто-завершение одиночных уроков после окончания времени (без немедленного списания). */
+async function autoCompletePastSingleLessons(now = Date.now()) {
+  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
+  let count = 0;
+
+  for (const doc of snap.docs) {
+    const lesson = doc.data();
+    if (lesson.isRecurring === true || lesson.rrule) {
+      continue;
+    }
+    const endMs = lessonEndMs(lesson);
+    if (endMs === null || endMs > now) {
+      continue;
+    }
+    await doc.ref.update({
+      status: 'completed',
+      completed_at: new Date(endMs),
+      billing_processed: false,
+      balance_debited: false,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    count += 1;
+  }
+
+  return { count };
+}
+
 async function runBillingWorkerCycle() {
   const now = Date.now();
+
+  const autoSingle = await autoCompletePastSingleLessons(now);
+  const autoRecurring = await autoCompletePastRecurringOccurrences(now);
+  const recurringBilled = await billDueRecurringOccurrences(now);
+
   const snap = await db
     .collection('lessons')
     .where('status', '==', 'completed')
@@ -163,8 +209,21 @@ async function runBillingWorkerCycle() {
     }
   }
 
+  const parts = [];
+  if (autoSingle.count > 0) {
+    parts.push(`auto-completed ${autoSingle.count} single`);
+  }
+  if (autoRecurring.completed > 0) {
+    parts.push(`auto-completed ${autoRecurring.completed} recurring occurrence(s)`);
+  }
+  if (recurringBilled.debited > 0) {
+    parts.push(`billed ${recurringBilled.debited} recurring occurrence(s)`);
+  }
   if (dueLessons.length > 0) {
-    console.info(`[billingWorker] processed ${dueLessons.length} lesson(s)`);
+    parts.push(`billed ${dueLessons.length} single lesson(s)`);
+  }
+  if (parts.length > 0) {
+    console.info(`[billingWorker] ${parts.join(', ')}`);
   }
 }
 
@@ -183,6 +242,7 @@ function startBillingWorker() {
 module.exports = {
   startBillingWorker,
   runBillingWorkerCycle,
+  autoCompletePastSingleLessons,
   BUFFER_MS,
   completedAtMs,
   isLessonDueForBilling,

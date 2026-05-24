@@ -93,6 +93,7 @@ function applyLessonStatusBilling(batch, {
   studentBillingType,
   shouldDeduct,
   autoDebitEnabled,
+  manualCompletion = false,
 }) {
   if (!studentId || !studentRef || !lessonRef) {
     return {};
@@ -112,6 +113,41 @@ function applyLessonStatusBilling(batch, {
     }
     if (autoDebitEnabled === false) {
       return { skipped: true, autoDebitDisabled: true };
+    }
+    if (manualCompletion === true) {
+      batch.update(lessonRef, {
+        completed_at: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      if (billingType === 'package') {
+        applyBalanceDebit(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId,
+          reason: 'lesson_completed',
+        });
+        return { debited: true };
+      }
+      batch.update(studentRef, {
+        unpaid_lessons_count: FieldValue.increment(1),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      batch.update(lessonRef, {
+        billing_processed: true,
+        balance_debited: false,
+      });
+      appendBalanceLog(batch, {
+        tutorId,
+        studentId,
+        studentName,
+        lessonId,
+        amount: 1,
+        reason: 'lesson_completed_postpaid',
+      });
+      return { debited: true };
     }
     batch.update(lessonRef, {
       completed_at: FieldValue.serverTimestamp(),

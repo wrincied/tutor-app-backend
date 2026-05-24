@@ -18,8 +18,34 @@ const {
   isMissedOrCanceledStatus,
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
+const { normalizeRecurrenceFields, dayKeyFromDate } = require('../utils/lessonRecurrence');
+const {
+  normalizeOccurrenceDate,
+  applyRecurringOccurrenceStatus,
+  excludeRecurringOccurrence,
+} = require('../services/lessonOccurrence');
 
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
+
+function isRecurringSeries(lesson) {
+  return lesson?.isRecurring === true || Boolean(lesson?.rrule);
+}
+
+function resolveOccurrenceDate(body, existing) {
+  const direct = normalizeOccurrenceDate(body.occurrence_date);
+  if (direct) {
+    return direct;
+  }
+  const scheduledRaw = body.scheduledAt ?? existing?.scheduledAt;
+  if (!scheduledRaw) {
+    return null;
+  }
+  const parsed = new Date(scheduledRaw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return normalizeOccurrenceDate(dayKeyFromDate(parsed));
+}
 
 function clampDuration(raw) {
   const minutes = Number(raw);
@@ -126,6 +152,8 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
     const studentRef = db.collection('students').doc(normalizedStudentId);
     const createdRef = db.collection('lessons').doc();
 
+    const recurrence = normalizeRecurrenceFields(req.body, scheduledAt);
+
     const lessonData = {
       tutor: tutorId,
       student_id: normalizedStudentId,
@@ -138,6 +166,11 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       title: title ? String(title).trim() : '',
       notes: notes ? String(notes).trim() : '',
       scheduledAt: scheduledAt ? String(scheduledAt) : null,
+      isRecurring: recurrence.isRecurring,
+      startDate: recurrence.startDate,
+      rrule: recurrence.rrule,
+      exdates: [],
+      completedDates: [],
       reminder_sent: false,
       balance_debited: false,
       billing_processed: false,
@@ -147,7 +180,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
 
     const batch = db.batch();
     batch.set(createdRef, lessonData);
-    if (isMissedOrCanceledStatus(normalizedStatus)) {
+    if (isMissedOrCanceledStatus(normalizedStatus) || isCompletedStatus(normalizedStatus)) {
       applyLessonStatusBilling(batch, {
         tutorId,
         studentId: normalizedStudentId,
@@ -162,6 +195,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
         studentBillingType: studentData.billing_type,
         shouldDeduct: shouldDeductOnCreate,
         autoDebitEnabled: studentData.auto_debit_enabled !== false,
+        manualCompletion: req.body.manual_completion !== false,
       });
     } else {
       applyLessonBalanceOnCreate(batch, {
@@ -190,6 +224,52 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     }
 
     const existing = lessonSnap.data();
+    const seriesRecurring = isRecurringSeries(existing);
+    const occurrenceDate = seriesRecurring ? resolveOccurrenceDate(req.body, existing) : null;
+    let occurrenceStatusRaw = req.body.occurrence_status;
+    if (occurrenceStatusRaw === undefined && seriesRecurring && occurrenceDate) {
+      const bodyStatus = req.body.status;
+      if (
+        bodyStatus !== undefined &&
+        bodyStatus !== 'scheduled' &&
+        ALLOWED_STATUS.has(String(bodyStatus))
+      ) {
+        occurrenceStatusRaw = bodyStatus;
+      }
+    }
+
+    if (seriesRecurring && occurrenceDate && occurrenceStatusRaw !== undefined) {
+      if (!existing.student_id) {
+        return res.status(400).json({ message: 'student_id is required' });
+      }
+      const studentRef = db.collection('students').doc(existing.student_id);
+      const studentSnap = await studentRef.get();
+      if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+        return res.status(400).json({ message: 'Student not found' });
+      }
+      if (
+        (occurrenceStatusRaw === 'missed' || occurrenceStatusRaw === 'canceled') &&
+        !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
+      ) {
+        return res.status(400).json({
+          message: 'should_deduct_balance is required when status is missed or canceled',
+        });
+      }
+      const manualCompletion = req.body.manual_completion !== false;
+      await applyRecurringOccurrenceStatus({
+        tutorId,
+        lessonRef,
+        existing,
+        occurrenceDate,
+        nextStatus: occurrenceStatusRaw,
+        shouldDeduct: req.body.should_deduct_balance === true,
+        autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
+        studentSnap,
+        studentRef,
+        billImmediately: manualCompletion,
+      });
+    }
+
     const {
       student_id,
       lesson_duration,
@@ -202,6 +282,10 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     const patch = {
       updatedAt: FieldValue.serverTimestamp(),
     };
+
+    if (seriesRecurring) {
+      patch.status = 'scheduled';
+    }
 
     const hasStudentField = Object.prototype.hasOwnProperty.call(req.body, 'student_id');
     if (hasStudentField) {
@@ -236,7 +320,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     if (lesson_duration !== undefined) {
       patch.lesson_duration = clampDuration(lesson_duration);
     }
-    if (status !== undefined) {
+    if (status !== undefined && !seriesRecurring) {
       patch.status = ALLOWED_STATUS.has(status) ? status : existing.status;
     }
     if (title !== undefined) {
@@ -249,6 +333,37 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       patch.scheduledAt = scheduledAt ? String(scheduledAt) : null;
     }
 
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'isRecurring') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'rrule') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'startDate')
+    ) {
+      const effectiveScheduledAt = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt')
+        ? scheduledAt
+        : existing.scheduledAt;
+      const recurrence = normalizeRecurrenceFields(
+        {
+          isRecurring: Object.prototype.hasOwnProperty.call(req.body, 'isRecurring')
+            ? req.body.isRecurring
+            : existing.isRecurring,
+          rrule: Object.prototype.hasOwnProperty.call(req.body, 'rrule')
+            ? req.body.rrule
+            : existing.rrule,
+          startDate: Object.prototype.hasOwnProperty.call(req.body, 'startDate')
+            ? req.body.startDate
+            : existing.startDate,
+        },
+        effectiveScheduledAt,
+      );
+      patch.isRecurring = recurrence.isRecurring;
+      patch.rrule = recurrence.rrule;
+      patch.startDate = recurrence.startDate;
+      if (seriesRecurring && !recurrence.isRecurring) {
+        patch.exdates = [];
+        patch.completedDates = [];
+      }
+    }
+
     const scheduleChanged = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt');
     const durationChanged = Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration');
     if (scheduleChanged || durationChanged) {
@@ -257,60 +372,61 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
 
     const nextStatus = patch.status ?? existing.status;
     const studentIdForBalance = patch.student_id ?? existing.student_id;
-    const statusChangingToMissedCanceled =
-      status !== undefined &&
-      isMissedOrCanceledStatus(nextStatus) &&
-      !isMissedOrCanceledStatus(existing.status);
 
-    if (
-      statusChangingToMissedCanceled &&
-      !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
-    ) {
-      return res.status(400).json({
-        message: 'should_deduct_balance is required when status is missed or canceled',
-      });
-    }
+    const batch = db.batch();
+    batch.update(lessonRef, patch);
 
-    const shouldDeduct = req.body.should_deduct_balance === true;
+    if (!seriesRecurring) {
+      const statusChangingToMissedCanceled =
+        status !== undefined &&
+        isMissedOrCanceledStatus(nextStatus) &&
+        !isMissedOrCanceledStatus(existing.status);
 
-    let studentRef = null;
-    let studentSnap = null;
-    if (studentIdForBalance) {
-      studentRef = db.collection('students').doc(studentIdForBalance);
-      studentSnap = await studentRef.get();
-      if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
-        return res.status(400).json({ message: 'Student not found' });
-      }
       if (
-        isCompletedStatus(nextStatus) &&
-        studentSnap.data().auto_debit_enabled === false &&
-        !isCompletedStatus(existing.status)
+        statusChangingToMissedCanceled &&
+        !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
       ) {
         return res.status(400).json({
-          message: 'Auto debit is disabled for this student',
+          message: 'should_deduct_balance is required when status is missed or canceled',
+        });
+      }
+
+      const shouldDeduct = req.body.should_deduct_balance === true;
+
+      if (studentIdForBalance) {
+        const studentRef = db.collection('students').doc(studentIdForBalance);
+        const studentSnap = await studentRef.get();
+        if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+          return res.status(400).json({ message: 'Student not found' });
+        }
+        if (
+          isCompletedStatus(nextStatus) &&
+          studentSnap.data().auto_debit_enabled === false &&
+          !isCompletedStatus(existing.status)
+        ) {
+          return res.status(400).json({
+            message: 'Auto debit is disabled for this student',
+          });
+        }
+        applyLessonStatusBilling(batch, {
+          tutorId,
+          studentId: studentIdForBalance,
+          studentName: studentSnap.data().name,
+          studentRef,
+          lessonRef,
+          lessonId: lessonRef.id,
+          previousStatus: existing.status,
+          nextStatus,
+          balanceDebited: existing.balance_debited,
+          billingProcessed: existing.billing_processed,
+          studentBillingType: studentSnap.data().billing_type,
+          shouldDeduct,
+          autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
+          manualCompletion: req.body.manual_completion !== false,
         });
       }
     }
 
-    const batch = db.batch();
-    batch.update(lessonRef, patch);
-    if (studentRef && studentSnap) {
-      applyLessonStatusBilling(batch, {
-        tutorId,
-        studentId: studentIdForBalance,
-        studentName: studentSnap.data().name,
-        studentRef,
-        lessonRef,
-        lessonId: lessonRef.id,
-        previousStatus: existing.status,
-        nextStatus,
-        balanceDebited: existing.balance_debited,
-        billingProcessed: existing.billing_processed,
-        studentBillingType: studentSnap.data().billing_type,
-        shouldDeduct,
-        autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
-      });
-    }
     await batch.commit();
 
     const updatedSnap = await lessonRef.get();
@@ -353,6 +469,20 @@ router.delete('/:id', async (req, res, next) => {
     }
 
     const existing = lessonSnap.data();
+    const scope = String(req.query.scope ?? req.body?.scope ?? 'series').toLowerCase();
+    const occurrenceDate = normalizeOccurrenceDate(
+      req.query.occurrence_date ?? req.body?.occurrence_date,
+    );
+
+    if (isRecurringSeries(existing) && scope === 'occurrence') {
+      if (!occurrenceDate) {
+        return res.status(400).json({ message: 'occurrence_date is required for occurrence delete' });
+      }
+      await excludeRecurringOccurrence({ tutorId, lessonRef, existing, occurrenceDate });
+      const updatedSnap = await lessonRef.get();
+      return res.json(serializeDoc(updatedSnap));
+    }
+
     const batch = db.batch();
     batch.delete(lessonRef);
 

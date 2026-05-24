@@ -11,6 +11,12 @@ const {
   normalizeTaxMode,
 } = require('../utils/userProfile');
 const { DEFAULT_COUNTRY, normalizeCountryCode } = require('../utils/subscriptionPricing');
+const {
+  DEFAULT_WORKSPACE,
+  DEFAULT_WORKING_HOURS,
+  normalizeWorkspace,
+  normalizeWorkingHours,
+} = require('../utils/userWorkspaceSettings');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
 
@@ -32,6 +38,8 @@ async function ensureTutorUserDoc(req) {
       tax_mode: 'none',
       timezone: DEFAULT_TIMEZONE,
       subscription_status: 'free',
+      workspace: DEFAULT_WORKSPACE,
+      workingHours: DEFAULT_WORKING_HOURS,
       role: 'tutor',
       onboarding_completed: false,
       data_consent_accepted: null,
@@ -86,7 +94,7 @@ router.put('/me', auth, async (req, res, next) => {
     }
 
     const userData = userSnap.data();
-    const { name, first_name, last_name, tax_mode, timezone } = req.body;
+    const { name, first_name, last_name, tax_mode, timezone, workspace, workingHours } = req.body;
 
     const patch = { updatedAt: FieldValue.serverTimestamp() };
 
@@ -116,8 +124,39 @@ router.put('/me', auth, async (req, res, next) => {
     if (timezone !== undefined) {
       patch.timezone = String(timezone);
     }
+    if (workspace !== undefined) {
+      patch.workspace = normalizeWorkspace(workspace);
+    }
+    if (workingHours !== undefined) {
+      patch.workingHours = normalizeWorkingHours(workingHours);
+    }
 
     await userRef.update(patch);
+    const updatedSnap = await userRef.get();
+    const user = enrichUserProfile(serializeDoc(updatedSnap));
+    const { password_hash: _ph, ...safeUser } = user;
+    safeUser.email_verified = req.user.email_verified;
+    res.json(safeUser);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/me/marketing-cookies', auth, async (req, res, next) => {
+  try {
+    const userRef = await ensureTutorUserDoc(req);
+    const accepted = req.body?.accepted;
+    if (typeof accepted !== 'boolean') {
+      return res.status(400).json({ message: 'accepted must be a boolean' });
+    }
+
+    const now = FieldValue.serverTimestamp();
+    await userRef.update({
+      marketing_cookies_accepted: accepted,
+      marketing_cookies_at: now,
+      updatedAt: now,
+    });
+
     const updatedSnap = await userRef.get();
     const user = enrichUserProfile(serializeDoc(updatedSnap));
     const { password_hash: _ph, ...safeUser } = user;

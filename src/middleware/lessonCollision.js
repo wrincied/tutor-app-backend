@@ -1,4 +1,5 @@
 const { db } = require('../firebase');
+const { lessonOccurrenceIntervals } = require('../utils/lessonRecurrence');
 
 function clampDuration(raw) {
   const minutes = Number(raw);
@@ -25,6 +26,17 @@ function intervalsOverlap(startA, endA, startB, endB) {
   return Math.max(startA, startB) < Math.min(endA, endB);
 }
 
+function collisionRangeAround(scheduledAt) {
+  const anchor = new Date(scheduledAt);
+  const start = new Date(anchor);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - 7);
+  const end = new Date(anchor);
+  end.setHours(23, 59, 59, 999);
+  end.setDate(end.getDate() + 7 * 26);
+  return { start, end };
+}
+
 /**
  * POST / PUT: 409 if a scheduled lesson overlaps another scheduled lesson of the same tutor.
  */
@@ -35,11 +47,19 @@ async function checkLessonCollision(req, res, next) {
     let scheduledAt = req.body.scheduledAt;
     let lessonDuration = req.body.lesson_duration;
     let excludeId = null;
+    let candidateRecurrence = {
+      isRecurring: req.body.isRecurring === true,
+      rrule: req.body.rrule ?? null,
+      startDate: req.body.startDate ?? null,
+    };
 
     if (req.method === 'PUT' && req.params.id) {
       const scheduleTouched =
         Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt') ||
-        Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration');
+        Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'isRecurring') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'rrule') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'startDate');
       if (!scheduleTouched) {
         return next();
       }
@@ -59,6 +79,17 @@ async function checkLessonCollision(req, res, next) {
       if (!Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration')) {
         lessonDuration = existing.lesson_duration;
       }
+      candidateRecurrence = {
+        isRecurring: Object.prototype.hasOwnProperty.call(req.body, 'isRecurring')
+          ? req.body.isRecurring === true
+          : existing.isRecurring === true,
+        rrule: Object.prototype.hasOwnProperty.call(req.body, 'rrule')
+          ? req.body.rrule
+          : existing.rrule,
+        startDate: Object.prototype.hasOwnProperty.call(req.body, 'startDate')
+          ? req.body.startDate
+          : existing.startDate,
+      };
     }
 
     const effectiveStatus = status === undefined ? 'scheduled' : status;
@@ -66,8 +97,19 @@ async function checkLessonCollision(req, res, next) {
       return next();
     }
 
-    const candidate = intervalBounds(scheduledAt, lessonDuration);
-    if (!candidate) {
+    if (!scheduledAt) {
+      return next();
+    }
+
+    const range = collisionRangeAround(scheduledAt);
+    const candidateLesson = {
+      scheduledAt,
+      lesson_duration: lessonDuration,
+      ...candidateRecurrence,
+    };
+
+    const candidateIntervals = lessonOccurrenceIntervals(candidateLesson, range.start, range.end);
+    if (candidateIntervals.length === 0) {
       return next();
     }
 
@@ -81,12 +123,13 @@ async function checkLessonCollision(req, res, next) {
       if (data.status !== 'scheduled') {
         continue;
       }
-      const other = intervalBounds(data.scheduledAt, data.lesson_duration);
-      if (!other) {
-        continue;
-      }
-      if (intervalsOverlap(candidate.start, candidate.end, other.start, other.end)) {
-        return res.status(409).json({ error: 'Time slot collision' });
+      const otherIntervals = lessonOccurrenceIntervals(data, range.start, range.end);
+      for (const candidate of candidateIntervals) {
+        for (const other of otherIntervals) {
+          if (intervalsOverlap(candidate.start, candidate.end, other.start, other.end)) {
+            return res.status(409).json({ error: 'Time slot collision' });
+          }
+        }
       }
     }
 

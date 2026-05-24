@@ -5,6 +5,7 @@ const {
   normalizeCountryCode,
   DEFAULT_COUNTRY,
 } = require('./subscriptionPricing');
+const { normalizeWorkspace, normalizeWorkingHours } = require('./userWorkspaceSettings');
 
 const ALLOWED_TAX_MODES = new Set([
   'at-self-employed',
@@ -89,6 +90,8 @@ function enrichUserProfile(user) {
     subscription_status: subscriptionLabel(user.subscription_status),
     subscription_pricing: getSubscriptionPricing(country_settings),
     role: normalizeRole(user.role),
+    workspace: normalizeWorkspace(user.workspace),
+    workingHours: normalizeWorkingHours(user.workingHours),
   };
 }
 
