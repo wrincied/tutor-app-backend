@@ -60,12 +60,10 @@ app.delete('/api/lessons-debug/:id', auth, async (req, res, next) => {
   }
 });
 
-const { startBillingWorker } = require('./src/utils/billingWorker');
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT} (Firestore)`);
   console.log(`CORS origins: ${parseCorsOrigins().join(', ')}`);
-  startBillingWorker();
 });

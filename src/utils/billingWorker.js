@@ -1,4 +1,3 @@
-const cron = require('node-cron');
 const { db, FieldValue } = require('../firebase');
 const { normalizeBillingType } = require('./studentBilling');
 const { appendStudentBalanceLog } = require('./activityLog');
@@ -9,7 +8,6 @@ const {
 } = require('../services/lessonOccurrence');
 
 const BUFFER_MS = LESSON_BILLING_BUFFER_MS;
-const CRON_SCHEDULE = '*/10 * * * *';
 
 function completedAtMs(lesson) {
   const raw = lesson.completed_at;
@@ -228,15 +226,9 @@ async function runBillingWorkerCycle() {
 }
 
 function startBillingWorker() {
-  if (process.env.BILLING_WORKER_ENABLED === 'false') {
-    return;
-  }
-  cron.schedule(CRON_SCHEDULE, () => {
-    runBillingWorkerCycle().catch((error) => {
-      console.error('[billingWorker] cycle error:', error);
-    });
-  });
-  console.info('[billingWorker] scheduled every 10 minutes (30 min completion buffer)');
+  console.info(
+    '[billingWorker] scheduler removed from Express backend. Run billing from Firebase onSchedule.',
+  );
 }
 
 module.exports = {
