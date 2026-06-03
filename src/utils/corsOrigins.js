@@ -5,8 +5,8 @@ const DEFAULT_ORIGINS = [
   'https://tutorassis.firebaseapp.com',
   'https://simple4u-64822.web.app',
   'https://simple4u-64822.firebaseapp.com',
+  'https://wrincied.github.io',
 ];
-
 function normalizeOrigin(value) {
   return String(value ?? '').trim().replace(/\/$/, '');
 }

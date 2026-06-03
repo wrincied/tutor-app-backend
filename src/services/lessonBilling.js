@@ -92,6 +92,7 @@ function applyLessonStatusBilling(batch, {
   billingProcessed,
   studentBillingType,
   shouldDeduct,
+  shouldRefund,
   autoDebitEnabled,
   manualCompletion = false,
 }) {
@@ -183,6 +184,45 @@ function applyLessonStatusBilling(batch, {
         studentName,
         lessonId,
         reason: balanceLogReason(nextStatus, false, true),
+      });
+      return { refunded: true };
+    }
+    return { skipped: true };
+  }
+
+  const shouldRefundBalance = shouldRefund === true;
+
+  // Явный возврат без смены статуса (missed/canceled → missed/canceled).
+  if (
+    willBeMissedCanceled &&
+    wasMissedCanceled &&
+    shouldRefundBalance &&
+    alreadyDebited &&
+    normalizeLessonStatus(nextStatus) === normalizeLessonStatus(previousStatus)
+  ) {
+    applyBalanceRefund(batch, {
+      tutorId,
+      studentRef,
+      lessonRef,
+      studentId,
+      studentName,
+      lessonId,
+      reason: 'lesson_balance_refund',
+    });
+    return { refunded: true };
+  }
+
+  // Восстановление урока (missed/canceled → scheduled и т.п.).
+  if (wasMissedCanceled && !willBeMissedCanceled && !willBeCompleted) {
+    if (shouldRefundBalance && alreadyDebited) {
+      applyBalanceRefund(batch, {
+        tutorId,
+        studentRef,
+        lessonRef,
+        studentId,
+        studentName,
+        lessonId,
+        reason: 'lesson_restored_refund',
       });
       return { refunded: true };
     }

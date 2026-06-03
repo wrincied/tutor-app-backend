@@ -103,6 +103,18 @@ async function listActivityLogs({ tutorId, category, limit = 50 }) {
     .slice(0, capped);
 }
 
+async function listAllActivityLogs({ tutorId, limit = 100 }) {
+  const capped = Math.min(Math.max(Number(limit) || 100, 1), 200);
+  const snap = await db.collection('activity_logs').where('tutor_id', '==', tutorId).limit(500).get();
+  return serializeQuerySnapshot(snap)
+    .sort((left, right) => {
+      const leftMs = left.createdAt ? Date.parse(left.createdAt) : 0;
+      const rightMs = right.createdAt ? Date.parse(right.createdAt) : 0;
+      return rightMs - leftMs;
+    })
+    .slice(0, capped);
+}
+
 module.exports = {
   STUDENT_LOG_FIELDS,
   collectChanges,
@@ -110,5 +122,6 @@ module.exports = {
   appendActivityLog,
   writeActivityLog,
   listActivityLogs,
+  listAllActivityLogs,
   appendStudentBalanceLog,
 };

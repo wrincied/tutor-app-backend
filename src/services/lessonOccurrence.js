@@ -241,6 +241,7 @@ async function applyRecurringOccurrenceStatus({
   occurrenceDate,
   nextStatus,
   shouldDeduct,
+  shouldRefund = false,
   autoDebitEnabled,
   studentSnap,
   studentRef,
@@ -415,14 +416,41 @@ async function applyRecurringOccurrenceStatus({
   }
 
   if (normalizedStatus === 'scheduled') {
+    const wasExcluded = exdates.includes(occurrenceDate);
     const nextExdates = exdates.filter((date) => date !== occurrenceDate);
     batch.update(lessonRef, {
       exdates: nextExdates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
+    if (wasExcluded && shouldRefund === true) {
+      const debited = await occurrenceBalanceDebited(lessonId, occurrenceDate);
+      if (debited) {
+        if (billingType === 'package') {
+          creditPackageOccurrence(batch, {
+            tutorId,
+            studentRef,
+            lessonRef,
+            studentId,
+            studentName,
+            lessonId,
+            occurrenceDate,
+          });
+        } else {
+          creditPostpaidOccurrence(batch, {
+            tutorId,
+            studentRef,
+            lessonRef,
+            studentId,
+            studentName,
+            lessonId,
+            occurrenceDate,
+          });
+        }
+      }
+    }
     await batch.commit();
-    return { restored: true, occurrenceDate };
+    return { restored: true, occurrenceDate, refunded: shouldRefund === true };
   }
 
   return { skipped: true };

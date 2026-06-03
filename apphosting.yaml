@@ -15,7 +15,8 @@ env:
       https://simple4u-64822.web.app,
       https://simple4u-64822.firebaseapp.com,
       https://tutorassis.web.app,
-      https://tutorassis.firebaseapp.com
+      https://tutorassis.firebaseapp.com,
+      https://wrincied.github.io
     availability:
       - RUNTIME
 

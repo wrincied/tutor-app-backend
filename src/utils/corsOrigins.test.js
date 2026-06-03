@@ -7,6 +7,7 @@ describe('corsOrigins', () => {
     const origins = parseCorsOrigins();
     assert.ok(origins.includes('https://simple4u-64822.web.app'));
     assert.ok(origins.includes('https://simple4u-64822.firebaseapp.com'));
+    assert.ok(origins.includes('https://wrincied.github.io'));
   });
 
   it('merges comma-separated FRONTEND_URL with defaults', () => {

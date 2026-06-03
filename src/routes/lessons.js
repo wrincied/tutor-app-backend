@@ -9,6 +9,7 @@ const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const {
   studentSnapshotFromStudent,
   enrichLessonSnapshot,
+  normalizeLessonStatus,
 } = require('../utils/lessonSnapshot');
 const {
   applyLessonStatusBilling,
@@ -23,6 +24,8 @@ const {
   normalizeOccurrenceDate,
   applyRecurringOccurrenceStatus,
   excludeRecurringOccurrence,
+  occurrenceBalanceDebited,
+  uniqueDates,
 } = require('../services/lessonOccurrence');
 
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
@@ -255,6 +258,18 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           message: 'should_deduct_balance is required when status is missed or canceled',
         });
       }
+      const exdates = uniqueDates(existing.exdates);
+      const occurrenceWasExcluded = occurrenceDate && exdates.includes(occurrenceDate);
+      if (
+        occurrenceStatusRaw === 'scheduled' &&
+        occurrenceWasExcluded &&
+        (await occurrenceBalanceDebited(lessonRef.id, occurrenceDate)) &&
+        !Object.prototype.hasOwnProperty.call(req.body, 'should_refund_balance')
+      ) {
+        return res.status(400).json({
+          message: 'should_refund_balance is required when restoring a debited occurrence',
+        });
+      }
       const manualCompletion = req.body.manual_completion !== false;
       await applyRecurringOccurrenceStatus({
         tutorId,
@@ -263,6 +278,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         occurrenceDate,
         nextStatus: occurrenceStatusRaw,
         shouldDeduct: req.body.should_deduct_balance === true,
+        shouldRefund: req.body.should_refund_balance === true,
         autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
         studentSnap,
         studentRef,
@@ -382,6 +398,19 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         isMissedOrCanceledStatus(nextStatus) &&
         !isMissedOrCanceledStatus(existing.status);
 
+      const statusRestoringFromMissedCanceled =
+        status !== undefined &&
+        isMissedOrCanceledStatus(existing.status) &&
+        !isMissedOrCanceledStatus(nextStatus) &&
+        !isCompletedStatus(nextStatus);
+
+      const refundOnly =
+        status !== undefined &&
+        isMissedOrCanceledStatus(nextStatus) &&
+        isMissedOrCanceledStatus(existing.status) &&
+        normalizeLessonStatus(nextStatus) === normalizeLessonStatus(existing.status) &&
+        req.body.should_refund_balance === true;
+
       if (
         statusChangingToMissedCanceled &&
         !Object.prototype.hasOwnProperty.call(req.body, 'should_deduct_balance')
@@ -391,7 +420,22 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         });
       }
 
+      if (
+        statusRestoringFromMissedCanceled &&
+        existing.balance_debited &&
+        !Object.prototype.hasOwnProperty.call(req.body, 'should_refund_balance')
+      ) {
+        return res.status(400).json({
+          message: 'should_refund_balance is required when restoring a debited lesson',
+        });
+      }
+
+      if (refundOnly && !existing.balance_debited) {
+        return res.status(400).json({ message: 'Lesson balance was not debited' });
+      }
+
       const shouldDeduct = req.body.should_deduct_balance === true;
+      const shouldRefund = req.body.should_refund_balance === true;
 
       if (studentIdForBalance) {
         const studentRef = db.collection('students').doc(studentIdForBalance);
@@ -421,6 +465,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           billingProcessed: existing.billing_processed,
           studentBillingType: studentSnap.data().billing_type,
           shouldDeduct,
+          shouldRefund,
           autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
           manualCompletion: req.body.manual_completion !== false,
         });
