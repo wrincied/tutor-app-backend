@@ -18,8 +18,13 @@ function parseNonNegativeInt(raw, fallback = 0) {
   return Math.round(n);
 }
 
+function normalizeRateUnit(raw) {
+  return String(raw ?? 'hour').trim().toLowerCase() === 'lesson' ? 'lesson' : 'hour';
+}
+
 module.exports = {
   ALLOWED_BILLING_TYPES,
   normalizeBillingType,
+  normalizeRateUnit,
   parseNonNegativeInt,
 };

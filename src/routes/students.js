@@ -6,7 +6,7 @@ const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
-const { normalizeBillingType, parseNonNegativeInt } = require('../utils/studentBilling');
+const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt } = require('../utils/studentBilling');
 const {
   collectPatchChanges,
   listActivityLogs,
@@ -84,6 +84,7 @@ router.post('/', async (req, res, next) => {
       timezone,
       color_hex,
       billing_type,
+      rate_unit,
       balance_lessons,
       credit_limit,
     } = req.body;
@@ -112,6 +113,7 @@ router.post('/', async (req, res, next) => {
     }
 
     const billingType = normalizeBillingType(billing_type);
+    const rateUnit = normalizeRateUnit(rate_unit);
     const initialBalance =
       billingType === 'package' ? parseNonNegativeInt(balance_lessons, 0) : 0;
     const initialCreditLimit =
@@ -125,6 +127,7 @@ router.post('/', async (req, res, next) => {
       color_hex: studentColor,
       balance_lessons: initialBalance,
       billing_type: billingType,
+      rate_unit: rateUnit,
       credit_limit: initialCreditLimit,
       unpaid_lessons_count: 0,
       auto_debit_enabled: true,
@@ -174,6 +177,7 @@ router.put('/:id', async (req, res, next) => {
       auto_debit_enabled,
       balance_lessons,
       billing_type,
+      rate_unit,
       credit_limit,
       color_hex,
       bot_active,
@@ -203,6 +207,9 @@ router.put('/:id', async (req, res, next) => {
     }
     if (billing_type !== undefined) {
       patch.billing_type = normalizeBillingType(billing_type);
+    }
+    if (rate_unit !== undefined) {
+      patch.rate_unit = normalizeRateUnit(rate_unit);
     }
     if (balance_lessons !== undefined) {
       patch.balance_lessons = parseNonNegativeInt(balance_lessons, 0);
