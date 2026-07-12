@@ -58,6 +58,21 @@ async function ensureTutorUserDoc(req) {
   return userRef;
 }
 
+/** Фиксирует визит пользователя (last_login_at). Вызывается с фронта при входе в /app. */
+router.post('/presence', auth, async (req, res, next) => {
+  try {
+    const userRef = await ensureTutorUserDoc(req);
+    const now = FieldValue.serverTimestamp();
+    await userRef.update({
+      last_login_at: now,
+      updatedAt: now,
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /** Создаёт или обновляет профиль репетитора в Firestore (документ id = Firebase UID). */
 router.post('/bootstrap', auth, async (req, res, next) => {
   try {

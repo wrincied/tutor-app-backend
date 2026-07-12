@@ -7,6 +7,12 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const { enrichUserProfile, subscriptionLabel } = require('../utils/userProfile');
 const { getSubscriptionPricing } = require('../utils/subscriptionPricing');
+const {
+  buildAdminDashboard,
+  DEFAULT_DASHBOARD_WIDGETS,
+  normalizeDashboardWidgets,
+} = require('../utils/adminDashboard');
+const { listAllActivityLogs } = require('../utils/activityLog');
 
 const TRIAL_GIFT_DAYS = 14;
 
@@ -61,11 +67,83 @@ function adminUserRow(doc) {
     subscription_status: enriched.subscription_status,
     trial_ends_at: raw.trial_ends_at ?? null,
     createdAt: raw.createdAt ?? null,
+    last_login_at: raw.last_login_at ?? null,
+    last_activity_at: raw.last_activity_at ?? null,
+    email_verified: raw.email_verified === true,
+    onboarding_completed: raw.onboarding_completed === true,
+    country_settings: enriched.country_settings,
     role: enriched.role,
   };
 }
 
+function sortByTimestampDesc(rows, field) {
+  return [...rows].sort((left, right) => {
+    const leftMs = left[field] ? Date.parse(left[field]) : 0;
+    const rightMs = right[field] ? Date.parse(right[field]) : 0;
+    return rightMs - leftMs;
+  });
+}
+
 router.use(auth, requireSuperAdmin);
+
+router.get('/dashboard', async (req, res, next) => {
+  try {
+    const payload = await buildAdminDashboard(db);
+    res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/preferences', async (req, res, next) => {
+  try {
+    const snap = await db.collection('users').doc(req.user.id).get();
+    const widgets = normalizeDashboardWidgets(snap.data()?.admin_preferences?.dashboard_widgets);
+    res.json({ dashboard_widgets: widgets });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/preferences', async (req, res, next) => {
+  try {
+    const widgets = normalizeDashboardWidgets(req.body?.dashboard_widgets);
+    const userRef = db.collection('users').doc(req.user.id);
+    await userRef.update({
+      admin_preferences: { dashboard_widgets: widgets },
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    res.json({ ok: true, dashboard_widgets: widgets });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/users/:id/summary', async (req, res, next) => {
+  try {
+    const userRef = db.collection('users').doc(req.params.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const tutorId = req.params.id;
+    const [studentsSnap, lessonsSnap, activity] = await Promise.all([
+      db.collection('students').where('tutor_id', '==', tutorId).get(),
+      db.collection('lessons').where('tutor', '==', tutorId).get(),
+      listAllActivityLogs({ tutorId, limit: 10 }),
+    ]);
+
+    res.json({
+      user: adminUserRow(userSnap),
+      studentsCount: studentsSnap.size,
+      lessonsCount: lessonsSnap.size,
+      recentActivity: activity,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/stats', async (req, res, next) => {
   try {
@@ -98,6 +176,42 @@ router.get('/stats', async (req, res, next) => {
       conversionPercent,
       estimatedMrr,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/recent-activity', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+    let snap;
+    try {
+      snap = await db.collection('activity_logs').orderBy('createdAt', 'desc').limit(limit).get();
+    } catch {
+      snap = await db.collection('activity_logs').limit(500).get();
+    }
+
+    const usersSnap = await db.collection('users').get();
+    const emailById = new Map();
+    for (const doc of usersSnap.docs) {
+      emailById.set(doc.id, String(doc.data().email || '').trim());
+    }
+
+    const items = snap.docs.map((doc) => {
+      const raw = serializeDoc(doc);
+      return {
+        _id: raw._id,
+        tutor_id: raw.tutor_id,
+        user_email: emailById.get(raw.tutor_id) || raw.tutor_id || '',
+        category: raw.category,
+        action: raw.action,
+        summary: raw.summary ?? '',
+        student_name: raw.student_name ?? null,
+        createdAt: raw.createdAt ?? null,
+      };
+    });
+
+    res.json(sortByTimestampDesc(items, 'createdAt').slice(0, limit));
   } catch (error) {
     next(error);
   }
