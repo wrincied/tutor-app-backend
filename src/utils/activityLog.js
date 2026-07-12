@@ -45,6 +45,7 @@ function collectPatchChanges(before, patch, fields = STUDENT_LOG_FIELDS) {
 function appendStudentBalanceLog(writer, { tutorId, studentId, studentName, amount, reason, lessonId }) {
   const action = amount < 0 ? 'balance.debit' : 'balance.credit';
   const ref = db.collection('activity_logs').doc();
+  const now = FieldValue.serverTimestamp();
   writer.set(ref, {
     tutor_id: tutorId,
     category: 'students',
@@ -55,7 +56,12 @@ function appendStudentBalanceLog(writer, { tutorId, studentId, studentName, amou
     changes: [{ field: 'balance_lessons', from: null, to: amount }],
     metadata: { amount, reason, lessonId: lessonId ?? null },
     student_name: studentName ?? null,
-    createdAt: FieldValue.serverTimestamp(),
+    createdAt: now,
+  });
+  const userRef = db.collection('users').doc(tutorId);
+  writer.update(userRef, {
+    last_activity_at: now,
+    updatedAt: now,
   });
 }
 
@@ -76,6 +82,7 @@ function appendActivityLog(writer, payload) {
 }
 
 async function writeActivityLog(payload) {
+  const now = FieldValue.serverTimestamp();
   await db.collection('activity_logs').add({
     tutor_id: payload.tutorId,
     category: payload.category,
@@ -86,7 +93,11 @@ async function writeActivityLog(payload) {
     changes: payload.changes ?? [],
     metadata: payload.metadata ?? {},
     student_name: payload.studentName ?? null,
-    createdAt: FieldValue.serverTimestamp(),
+    createdAt: now,
+  });
+  await db.collection('users').doc(payload.tutorId).update({
+    last_activity_at: now,
+    updatedAt: now,
   });
 }
 
