@@ -58,10 +58,10 @@ function buildSubscriptionPatch(statusRaw, trialEndsAtRaw) {
   return { ok: true, patch };
 }
 
-function adminUserRow(doc) {
+function adminUserRow(doc, studentsCount) {
   const raw = serializeDoc(doc);
   const enriched = enrichUserProfile(raw);
-  return {
+  const row = {
     _id: enriched._id,
     email: enriched.email || '',
     subscription_status: enriched.subscription_status,
@@ -74,6 +74,23 @@ function adminUserRow(doc) {
     country_settings: enriched.country_settings,
     role: enriched.role,
   };
+  if (studentsCount !== undefined) {
+    row.studentsCount = studentsCount;
+  }
+  return row;
+}
+
+async function buildStudentsCountByTutor(db) {
+  const snap = await db.collection('students').get();
+  const counts = new Map();
+  snap.docs.forEach((doc) => {
+    const tutorId = doc.data().tutor_id;
+    if (!tutorId) {
+      return;
+    }
+    counts.set(tutorId, (counts.get(tutorId) || 0) + 1);
+  });
+  return counts;
 }
 
 function sortByTimestampDesc(rows, field) {
@@ -226,7 +243,10 @@ router.get('/users', async (req, res, next) => {
       snap = await db.collection('users').limit(500).get();
     }
 
-    res.json(snap.docs.map((doc) => adminUserRow(doc)));
+    const studentCounts = await buildStudentsCountByTutor(db);
+    res.json(
+      snap.docs.map((doc) => adminUserRow(doc, studentCounts.get(doc.id) ?? 0)),
+    );
   } catch (error) {
     next(error);
   }

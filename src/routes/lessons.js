@@ -19,7 +19,7 @@ const {
   isMissedOrCanceledStatus,
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
-const { normalizeRecurrenceFields, dayKeyFromDate } = require('../utils/lessonRecurrence');
+const { normalizeRecurrenceFields, dayKeyFromDate, lessonWithEffectiveSchedule } = require('../utils/lessonRecurrence');
 const {
   normalizeOccurrenceDate,
   applyRecurringOccurrenceStatus,
@@ -89,7 +89,7 @@ router.get('/', async (req, res, next) => {
       studentById.set(row._id, row);
     });
     const lessons = serializeQuerySnapshot(lessonsSnap).map((lesson) =>
-      enrichLessonSnapshot(lesson, studentById),
+      lessonWithEffectiveSchedule(enrichLessonSnapshot(lesson, studentById)),
     );
     lessons.sort((left, right) => {
       const l = left.scheduledAt ? Date.parse(left.scheduledAt) : 0;
