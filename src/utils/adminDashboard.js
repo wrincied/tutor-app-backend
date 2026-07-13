@@ -303,7 +303,6 @@ const DEFAULT_DASHBOARD_WIDGETS = [
   'activation-funnel',
   'alerts',
   'last-visits',
-  'recent-activity',
   'geography',
   'product-usage',
 ];
