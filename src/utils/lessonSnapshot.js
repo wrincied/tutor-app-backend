@@ -64,15 +64,23 @@ function lessonRevenueFromSnapshot(lessonData) {
 
 /** Доход по завершённому уроку: ставка-снапшот × часы. */
 function lessonIncomeFromSnapshot(lessonData) {
-  if (normalizeLessonStatus(lessonData.status) !== 'completed') {
+  return lessonIncomeForStatus(lessonData, lessonData.status);
+}
+
+/** Плановая выручка по запланированному уроку. */
+function lessonScheduledRevenueFromSnapshot(lessonData) {
+  return lessonScheduledRevenueForStatus(lessonData, lessonData.status);
+}
+
+function lessonIncomeForStatus(lessonData, status) {
+  if (normalizeLessonStatus(status) !== 'completed') {
     return 0;
   }
   return lessonRevenueFromSnapshot(lessonData);
 }
 
-/** Плановая выручка по запланированному уроку. */
-function lessonScheduledRevenueFromSnapshot(lessonData) {
-  if (normalizeLessonStatus(lessonData.status) !== 'scheduled') {
+function lessonScheduledRevenueForStatus(lessonData, status) {
+  if (normalizeLessonStatus(status) !== 'scheduled') {
     return 0;
   }
   return lessonRevenueFromSnapshot(lessonData);
@@ -113,5 +121,7 @@ module.exports = {
   lessonRevenueFromSnapshot,
   lessonIncomeFromSnapshot,
   lessonScheduledRevenueFromSnapshot,
+  lessonIncomeForStatus,
+  lessonScheduledRevenueForStatus,
   enrichLessonSnapshot,
 };

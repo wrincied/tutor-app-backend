@@ -1,4 +1,5 @@
 const { RRule } = require('rrule');
+const { normalizeLessonStatus } = require('./lessonSnapshot');
 
 const RRULE_WEEKDAY_CODES = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'];
 
@@ -138,6 +139,156 @@ function filterOccurrenceDates(dates, lesson) {
   return dates.filter((date) => !exdates.has(dayKeyFromDate(date)));
 }
 
+function statusForOccurrence(lesson, occurrenceDate) {
+  const completed = new Set((lesson.completedDates ?? []).map((item) => String(item).slice(0, 10)));
+  if (completed.has(occurrenceDate)) {
+    return 'completed';
+  }
+  const masterStatus = normalizeLessonStatus(lesson.status);
+  if (masterStatus === 'completed') {
+    return 'scheduled';
+  }
+  return masterStatus;
+}
+
+function parseScheduledDate(raw) {
+  if (!raw) {
+    return null;
+  }
+  if (typeof raw.toDate === 'function') {
+    return raw.toDate();
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Эффективное время урока: scheduledAt или fallback на createdAt. */
+function resolveEffectiveSchedule(lesson) {
+  const direct = parseScheduledDate(lesson?.scheduledAt);
+  if (direct) {
+    return {
+      scheduledAt: direct.toISOString(),
+      scheduleDerived: false,
+    };
+  }
+  const created = parseScheduledDate(lesson?.createdAt);
+  if (!created) {
+    return null;
+  }
+  return {
+    scheduledAt: created.toISOString(),
+    scheduleDerived: true,
+  };
+}
+
+function lessonWithEffectiveSchedule(lesson) {
+  const resolved = resolveEffectiveSchedule(lesson);
+  if (!resolved) {
+    return lesson;
+  }
+  return {
+    ...lesson,
+    scheduledAt: resolved.scheduledAt,
+    scheduleDerived: resolved.scheduleDerived,
+  };
+}
+
+function occurrenceInRange(date, rangeStart, rangeEnd) {
+  return date >= rangeStart && date <= endOfLocalDay(rangeEnd);
+}
+
+/** Диапазон для развёртки вхождений (как в календаре). */
+function financeOccurrenceRange(from, to, now = new Date()) {
+  if (from || to) {
+    const start = from ? new Date(from) : new Date(0);
+    const end = to ? endOfLocalDay(new Date(to)) : endOfLocalDay(new Date(now.getFullYear() + 2, 11, 31));
+    return { start, end };
+  }
+  const start = new Date(now);
+  start.setFullYear(start.getFullYear() - 10);
+  const end = new Date(now);
+  end.setFullYear(end.getFullYear() + 2);
+  end.setMonth(11, 31);
+  return { start, end: endOfLocalDay(end) };
+}
+
+function classifyFinanceOrphan(lesson) {
+  const resolved = resolveEffectiveSchedule(lesson);
+  if (!resolved) {
+    return 'no_schedule';
+  }
+  const working = lessonWithEffectiveSchedule(lesson);
+  const recurring = working.isRecurring === true || Boolean(working.rrule);
+  if (recurring && working.rrule && !buildRule(working)) {
+    return 'broken_recurrence';
+  }
+  return null;
+}
+
+/**
+ * Вхождения урока для финансов — та же логика, что expandLessonsForRange в календаре.
+ * Пустой массив = в периоде нет занятий, которое видно в расписании.
+ */
+function expandFinanceOccurrences(lesson, rangeStart, rangeEnd) {
+  const resolved = resolveEffectiveSchedule(lesson);
+  if (!resolved) {
+    return [];
+  }
+  const working = lessonWithEffectiveSchedule(lesson);
+  const scheduled = parseScheduledDate(working.scheduledAt);
+  if (!scheduled) {
+    return [];
+  }
+
+  const durationMinutes = Number(working.lesson_duration ?? 60);
+  const duration =
+    !Number.isNaN(durationMinutes) && durationMinutes > 0 ? durationMinutes : 60;
+  const recurring = working.isRecurring === true || Boolean(working.rrule);
+
+  if (!recurring || !working.rrule) {
+    if (!occurrenceInRange(scheduled, rangeStart, rangeEnd)) {
+      return [];
+    }
+    const occurrenceDate = dayKeyFromDate(scheduled);
+    return [
+      {
+        occurrenceDate,
+        scheduledAt: String(working.scheduledAt),
+        status: normalizeLessonStatus(working.status),
+        durationMinutes: duration,
+        isRecurring: false,
+        visibleInCalendar: true,
+        scheduleDerived: resolved.scheduleDerived,
+      },
+    ];
+  }
+
+  const rule = buildRule(working);
+  if (!rule) {
+    return [];
+  }
+
+  const anchor = new Date(working.scheduledAt);
+  const dates = filterOccurrenceDates(
+    rule.between(rangeStart, endOfLocalDay(rangeEnd), true),
+    working,
+  );
+
+  return dates.map((occurrence) => {
+    const at = applyAnchorTime(occurrence, anchor);
+    const occurrenceDate = dayKeyFromDate(occurrence);
+    return {
+      occurrenceDate,
+      scheduledAt: at.toISOString(),
+      status: statusForOccurrence(working, occurrenceDate),
+      durationMinutes: duration,
+      isRecurring: true,
+      visibleInCalendar: true,
+      scheduleDerived: resolved.scheduleDerived,
+    };
+  });
+}
+
 /** Интервалы scheduled урока (один или все вхождения серии) в диапазоне. */
 function lessonOccurrenceIntervals(lesson, rangeStart, rangeEnd) {
   if (!lesson?.scheduledAt) {
@@ -246,6 +397,11 @@ module.exports = {
   parseUntilDate,
   parseRruleParts,
   lessonOccurrenceIntervals,
+  expandFinanceOccurrences,
+  classifyFinanceOrphan,
+  financeOccurrenceRange,
+  resolveEffectiveSchedule,
+  lessonWithEffectiveSchedule,
   normalizeRecurrenceFields,
   buildRule,
   buildRruleFromForm,

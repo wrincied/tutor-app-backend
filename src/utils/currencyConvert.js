@@ -1,8 +1,10 @@
-/** Курсы: сколько единиц валюты за 1 EUR (база Frankfurter + запасные BYN/KZT). */
+/** Курсы: сколько единиц валюты за 1 EUR (официальные ЦБ + кэш ~1 ч). */
+
+const { fetchCentralBankRates } = require('./exchangeRateFetchers');
 
 const SUPPORTED = new Set(['EUR', 'USD', 'PLN', 'RUB', 'BYN', 'KZT']);
 
-/** Запасные курсы (единиц валюты за 1 EUR), если API недоступен. */
+/** Запасные курсы (единиц валюты за 1 EUR), если ЦБ недоступен. */
 const FALLBACK_EUR_RATES = {
   EUR: 1,
   USD: 1.09,
@@ -13,12 +15,11 @@ const FALLBACK_EUR_RATES = {
 };
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
-const FRANKFURTER_URL =
-  'https://api.frankfurter.app/latest?from=EUR&to=USD,PLN,RUB,BYN,KZT';
 
 let cachedRates = null;
 let cachedAt = 0;
 let cachedDate = null;
+let cachedSource = null;
 
 function normalizeCurrency(code) {
   const c = String(code ?? 'EUR')
@@ -56,24 +57,6 @@ function convertAmount(amount, fromCurrency, toCurrency, eurRates) {
   return roundMoney(inEur * toRate);
 }
 
-async function fetchFrankfurterRates() {
-  const res = await fetch(FRANKFURTER_URL, {
-    headers: { Accept: 'application/json' },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) {
-    throw new Error(`Frankfurter HTTP ${res.status}`);
-  }
-  const data = await res.json();
-  const rates = { EUR: 1, ...FALLBACK_EUR_RATES, ...(data.rates ?? {}) };
-  for (const code of SUPPORTED) {
-    if (!rates[code] || rates[code] <= 0) {
-      rates[code] = FALLBACK_EUR_RATES[code];
-    }
-  }
-  return { rates, date: data.date ?? new Date().toISOString().slice(0, 10) };
-}
-
 /**
  * Курсы «единиц валюты за 1 EUR» с кэшем ~1 ч.
  * @returns {Promise<{ rates: Record<string, number>, date: string, source: string }>}
@@ -84,26 +67,32 @@ async function getExchangeRates() {
     return {
       rates: cachedRates,
       date: cachedDate,
-      source: 'cache',
+      source: cachedSource,
     };
   }
 
   try {
-    const { rates, date } = await fetchFrankfurterRates();
+    const { rates, date, source } = await fetchCentralBankRates(FALLBACK_EUR_RATES);
     cachedRates = rates;
     cachedAt = now;
     cachedDate = date;
-    return { rates, date, source: 'frankfurter' };
+    cachedSource = source;
+    return { rates, date, source };
   } catch {
     cachedRates = { ...FALLBACK_EUR_RATES };
     cachedAt = now;
-    cachedDate = new Date().toISOString().slice(0, 10);
+    cachedDate = todayIso();
+    cachedSource = 'fallback';
     return {
       rates: cachedRates,
       date: cachedDate,
-      source: 'fallback',
+      source: cachedSource,
     };
   }
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /** Курсы для ответа API (единиц валюты за 1 EUR). */

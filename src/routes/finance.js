@@ -7,8 +7,8 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const {
   enrichLessonSnapshot,
-  lessonIncomeFromSnapshot,
-  lessonScheduledRevenueFromSnapshot,
+  lessonIncomeForStatus,
+  lessonScheduledRevenueForStatus,
   normalizeLessonStatus,
 } = require('../utils/lessonSnapshot');
 const {
@@ -19,6 +19,11 @@ const {
 } = require('../utils/currencyConvert');
 const { computeAustriaSelfEmployedProjection } = require('../utils/financeTax');
 const { collectPatchChanges, listActivityLogs, writeActivityLog } = require('../utils/activityLog');
+const {
+  classifyFinanceOrphan,
+  expandFinanceOccurrences,
+  financeOccurrenceRange,
+} = require('../utils/lessonRecurrence');
 
 const COUNTRY_CURRENCY = {
   AT: 'EUR',
@@ -29,6 +34,15 @@ const COUNTRY_CURRENCY = {
   KZ: 'KZT',
   US: 'USD',
 };
+
+function defaultCurrencyForUser(userData) {
+  const country = String(userData?.country_settings ?? 'AT').toUpperCase();
+  return COUNTRY_CURRENCY[country] ?? 'EUR';
+}
+
+function expenseStoredCurrency(data, accountDefaultCurrency) {
+  return normalizeCurrency(data?.currency ?? accountDefaultCurrency);
+}
 
 function parseDateQuery(value) {
   if (!value || typeof value !== 'string') {
@@ -42,16 +56,26 @@ function parseDateQuery(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function lessonDate(lessonData) {
-  const raw = lessonData.scheduledAt || lessonData.createdAt;
+function parseStoredDate(raw) {
   if (!raw) {
     return null;
   }
-  if (raw && typeof raw.toDate === 'function') {
+  if (typeof raw.toDate === 'function') {
     return raw.toDate();
   }
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function lessonDateIsoFromKey(occurrenceDate, scheduledAt) {
+  if (occurrenceDate && /^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)) {
+    return occurrenceDate;
+  }
+  if (!scheduledAt) {
+    return null;
+  }
+  const d = new Date(scheduledAt);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
 function expenseDate(expenseData) {
@@ -68,7 +92,7 @@ function expenseDate(expenseData) {
 
 function inPeriod(date, from, to) {
   if (!date) {
-    return true;
+    return !from && !to;
   }
   if (from && date < from) {
     return false;
@@ -144,10 +168,15 @@ router.post('/expenses', async (req, res, next) => {
         ? String(req.body.category).trim().slice(0, 64)
         : '';
 
+    const userSnap = await db.collection('users').doc(tutorId).get();
+    const accountDefaultCurrency = defaultCurrencyForUser(userSnap.exists ? userSnap.data() : {});
+    const currency = normalizeCurrency(req.body.currency ?? accountDefaultCurrency);
+
     const doc = {
       tutor: tutorId,
       title,
       amount,
+      currency,
       expense_date: expenseDateIso,
       category,
       createdAt: FieldValue.serverTimestamp(),
@@ -166,6 +195,7 @@ router.post('/expenses', async (req, res, next) => {
       metadata: {
         title: expense.title,
         amount: expense.amount,
+        currency: expense.currency ?? currency,
         expense_date: expense.expense_date,
         category: expense.category ?? '',
       },
@@ -204,6 +234,10 @@ router.put('/expenses/:id', async (req, res, next) => {
       patch.amount = amount;
     }
 
+    if (req.body.currency !== undefined) {
+      patch.currency = normalizeCurrency(req.body.currency);
+    }
+
     if (req.body.expense_date !== undefined) {
       const parsed = parseDateQuery(String(req.body.expense_date).slice(0, 10));
       if (!parsed) {
@@ -220,7 +254,7 @@ router.put('/expenses/:id', async (req, res, next) => {
     await ref.update(patch);
     const updated = await ref.get();
     const expense = serializeDoc(updated);
-    const expenseFields = ['title', 'amount', 'expense_date', 'category'];
+    const expenseFields = ['title', 'amount', 'currency', 'expense_date', 'category'];
     const changes = collectPatchChanges(before, patch, expenseFields);
     if (changes.length) {
       await writeActivityLog({
@@ -292,7 +326,7 @@ router.get('/summary', async (req, res, next) => {
     const userData = userSnap.exists ? userSnap.data() : {};
     const country = String(userData.country_settings ?? 'AT').toUpperCase();
     const taxMode = String(userData.tax_mode ?? 'none');
-    const defaultCurrency = COUNTRY_CURRENCY[country] ?? 'EUR';
+    const defaultCurrency = defaultCurrencyForUser(userData);
     const reportCurrency =
       req.query.currency && typeof req.query.currency === 'string'
         ? normalizeCurrency(req.query.currency)
@@ -318,59 +352,128 @@ router.get('/summary', async (req, res, next) => {
     let scheduledLessonHours = 0;
     const incomeByCurrency = {};
     const scheduledByCurrency = {};
+    const lessonsBreakdown = [];
+    const { start: occurrenceRangeStart, end: occurrenceRangeEnd } = financeOccurrenceRange(from, to);
 
     for (const data of lessons) {
-      if (!inPeriod(lessonDate(data), from, to)) {
+      const student = data.student_id ? studentById.get(data.student_id) : null;
+      const lessonCurrency = normalizeCurrency(data.lesson_currency);
+      const orphanReason = classifyFinanceOrphan(data);
+
+      if (orphanReason) {
+        const durationMinutes = Number(data.lesson_duration ?? 60);
+        lessonsBreakdown.push({
+          id: data._id,
+          studentId: data.student_id ?? null,
+          studentName: student?.name ? String(student.name) : null,
+          scheduledAt: null,
+          occurrenceDate: null,
+          status: normalizeLessonStatus(data.status),
+          durationMinutes:
+            !Number.isNaN(durationMinutes) && durationMinutes > 0 ? durationMinutes : 60,
+          amountReport: 0,
+          amountOriginal: 0,
+          currency: lessonCurrency,
+          visibleInCalendar: false,
+          isRecurring: data.isRecurring === true || Boolean(data.rrule),
+          incomeType: 'none',
+          hiddenReason: orphanReason,
+        });
         continue;
       }
-      const status = normalizeLessonStatus(data.status);
-      lessonCount += 1;
-      const durationMinutes = Number(data.lesson_duration ?? 60);
-      const hours =
-        !Number.isNaN(durationMinutes) && durationMinutes > 0 ? durationMinutes / 60 : 0;
 
-      if (status === 'scheduled') {
-        scheduledLessonCount += 1;
-        scheduledLessonHours += hours;
-      } else if (status === 'completed') {
-        completedLessonCount += 1;
-        completedLessonHours += hours;
-      } else if (status === 'missed') {
-        missedLessonCount += 1;
-      } else if (status === 'canceled') {
-        canceledLessonCount += 1;
-      }
+      const occurrences = expandFinanceOccurrences(data, occurrenceRangeStart, occurrenceRangeEnd);
+      for (const occurrence of occurrences) {
+        const status = normalizeLessonStatus(occurrence.status);
+        lessonCount += 1;
+        const hours = occurrence.durationMinutes / 60;
 
-      totalLessonHours += hours;
+        if (status === 'scheduled') {
+          scheduledLessonCount += 1;
+          scheduledLessonHours += hours;
+        } else if (status === 'completed') {
+          completedLessonCount += 1;
+          completedLessonHours += hours;
+        } else if (status === 'missed') {
+          missedLessonCount += 1;
+        } else if (status === 'canceled') {
+          canceledLessonCount += 1;
+        }
 
-      const earned = lessonIncomeFromSnapshot(data);
-      const planned = lessonScheduledRevenueFromSnapshot(data);
-      const lessonCurrency = normalizeCurrency(data.lesson_currency);
-      const earnedReport = convertAmount(earned, lessonCurrency, reportCurrency, eurRates);
-      const plannedReport = convertAmount(planned, lessonCurrency, reportCurrency, eurRates);
-      totalIncome += earnedReport;
-      scheduledIncome += plannedReport;
+        totalLessonHours += hours;
 
-      if (earned > 0) {
-        addIncomeByCurrency(incomeByCurrency, lessonCurrency, earned);
-      }
-      if (planned > 0) {
-        addIncomeByCurrency(scheduledByCurrency, lessonCurrency, planned);
+        const earned = lessonIncomeForStatus(data, status);
+        const planned = lessonScheduledRevenueForStatus(data, status);
+        const earnedReport = convertAmount(earned, lessonCurrency, reportCurrency, eurRates);
+        const plannedReport = convertAmount(planned, lessonCurrency, reportCurrency, eurRates);
+        totalIncome += earnedReport;
+        scheduledIncome += plannedReport;
+
+        if (earned > 0) {
+          addIncomeByCurrency(incomeByCurrency, lessonCurrency, earned);
+        }
+        if (planned > 0) {
+          addIncomeByCurrency(scheduledByCurrency, lessonCurrency, planned);
+        }
+
+        const rawRevenue = earned > 0 ? earned : planned;
+        lessonsBreakdown.push({
+          id: occurrence.isRecurring ? `${data._id}:${occurrence.occurrenceDate}` : data._id,
+          lessonId: data._id,
+          studentId: data.student_id ?? null,
+          studentName: student?.name ? String(student.name) : null,
+          scheduledAt: lessonDateIsoFromKey(occurrence.occurrenceDate, occurrence.scheduledAt),
+          occurrenceDate: occurrence.occurrenceDate,
+          status,
+          durationMinutes: occurrence.durationMinutes,
+          amountReport: earnedReport + plannedReport,
+          amountOriginal: rawRevenue,
+          currency: lessonCurrency,
+          visibleInCalendar: occurrence.visibleInCalendar,
+          isRecurring: occurrence.isRecurring,
+          incomeType: earned > 0 ? 'completed' : planned > 0 ? 'scheduled' : 'none',
+          hiddenReason: null,
+          scheduleDerived: Boolean(occurrence.scheduleDerived),
+        });
       }
     }
 
+    lessonsBreakdown.sort((left, right) => {
+      const l = left.scheduledAt ?? '';
+      const r = right.scheduledAt ?? '';
+      return r.localeCompare(l);
+    });
+
     let totalExpenses = 0;
     let expenseCount = 0;
+    const expensesBreakdown = [];
     expensesSnap.forEach((doc) => {
       const data = doc.data();
-      if (!inPeriod(expenseDate(data), from, to)) {
+      const expDate = expenseDate(data);
+      if (!inPeriod(expDate, from, to)) {
         return;
       }
       expenseCount += 1;
       const amount = Number(data.amount);
       const raw = Number.isNaN(amount) ? 0 : amount;
-      totalExpenses += convertAmount(raw, defaultCurrency, reportCurrency, eurRates);
+      const expenseCurrency = expenseStoredCurrency(data, defaultCurrency);
+      const amountReport = convertAmount(raw, expenseCurrency, reportCurrency, eurRates);
+      totalExpenses += amountReport;
+      const serialized = serializeDoc(doc);
+      expensesBreakdown.push({
+        id: serialized._id,
+        title: serialized.title,
+        amount: raw,
+        currency: expenseCurrency,
+        amountReport,
+        expense_date: serialized.expense_date,
+        category: serialized.category ?? '',
+      });
     });
+
+    expensesBreakdown.sort((left, right) =>
+      String(right.expense_date ?? '').localeCompare(String(left.expense_date ?? '')),
+    );
 
     const combinedIncome = totalIncome + scheduledIncome;
     const combinedByCurrency = {};
@@ -418,6 +521,8 @@ router.get('/summary', async (req, res, next) => {
         combinedByCurrency,
       },
       austria: taxMode === 'at-self-employed' ? austriaProjection : null,
+      lessonsBreakdown,
+      expensesBreakdown,
     });
   } catch (error) {
     next(error);
