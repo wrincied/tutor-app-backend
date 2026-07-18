@@ -11,6 +11,7 @@
     "dev": "nodemon server.js",
     "reset-password": "node scripts/reset-user-password.js",
     "confirm-subscription": "node scripts/confirm-subscription.js",
+    "finance:playground": "node scripts/finance-playground.js",
     "test": "node --test src/**/*.test.js"
   },
   "keywords": [],

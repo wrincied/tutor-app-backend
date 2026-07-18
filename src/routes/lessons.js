@@ -121,10 +121,11 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
 
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'lesson_price') ||
-      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency')
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'price_mode')
     ) {
       return res.status(400).json({
-        message: 'lesson_price and lesson_currency are snapshot fields and cannot be set directly',
+        message: 'lesson_price, lesson_currency and price_mode are snapshot fields and cannot be set directly',
       });
     }
 
@@ -163,6 +164,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       student_name: studentData.name || null,
       lesson_price: snapshot.lesson_price,
       lesson_currency: snapshot.lesson_currency,
+      price_mode: snapshot.price_mode,
       student_timezone: snapshot.student_timezone,
       lesson_duration: normalizedDuration,
       status: normalizedStatus,
@@ -319,6 +321,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         } else {
           patch.lesson_price = 0;
           patch.lesson_currency = 'EUR';
+          patch.price_mode = 'hourly';
           patch.student_timezone = 'UTC';
         }
       }
@@ -326,10 +329,11 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
 
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'lesson_price') ||
-      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency')
+      Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency') ||
+      Object.prototype.hasOwnProperty.call(req.body, 'price_mode')
     ) {
       return res.status(400).json({
-        message: 'lesson_price and lesson_currency are snapshot fields and cannot be set directly',
+        message: 'lesson_price, lesson_currency and price_mode are snapshot fields and cannot be set directly',
       });
     }
 

@@ -8,6 +8,7 @@ const PRICING_BY_COUNTRY = {
   KZ: { country: 'KZ', currency: 'KZT', monthly: 3900, yearly: 39000 },
   BY: { country: 'BY', currency: 'BYN', monthly: 19.99, yearly: 199.99 },
   RU: { country: 'RU', currency: 'RUB', monthly: 590, yearly: 5900 },
+  UA: { country: 'UA', currency: 'UAH', monthly: 399, yearly: 3990 },
 };
 
 const { UN_MEMBER_COUNTRY_CODE_SET } = require('../data/unCountryCodes');

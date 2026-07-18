@@ -6,7 +6,6 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const {
   enrichUserProfile,
-  isTaxModeConfigured,
   assertConfigurableTaxMode,
   normalizeTaxMode,
 } = require('../utils/userProfile');
@@ -123,18 +122,15 @@ router.put('/me', auth, async (req, res, next) => {
       patch.name = String(name).trim().slice(0, 120);
     }
     if (tax_mode !== undefined) {
-      const currentTax = normalizeTaxMode(userData.tax_mode);
-      if (isTaxModeConfigured(currentTax)) {
-        return res.status(403).json({
-          message: 'Tax regime can only be set once and cannot be changed',
-        });
-      }
       const check = assertConfigurableTaxMode(tax_mode);
       if (!check.ok) {
         return res.status(400).json({ message: check.message });
       }
-      patch.tax_mode = check.mode;
-      patch.tax_mode_set_at = FieldValue.serverTimestamp();
+      const currentTax = normalizeTaxMode(userData.tax_mode);
+      if (check.mode !== currentTax) {
+        patch.tax_mode = check.mode;
+        patch.tax_mode_set_at = FieldValue.serverTimestamp();
+      }
     }
     if (timezone !== undefined) {
       patch.timezone = String(timezone);

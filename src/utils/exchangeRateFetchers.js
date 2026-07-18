@@ -106,6 +106,29 @@ async function fetchNbkKztPerEur() {
   };
 }
 
+/** НБУ — UAH за 1 EUR. */
+async function fetchNbuUahPerEur() {
+  const data = await fetchJson(
+    'https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?valcode=EUR&json',
+  );
+  const row = Array.isArray(data) ? data[0] : data;
+  const rate = Number(row?.rate);
+  if (!rate) {
+    throw new Error('NBU EUR missing');
+  }
+  const rawDate = row?.exchangedate;
+  let date = todayIso();
+  if (typeof rawDate === 'string' && /^\d{2}\.\d{2}\.\d{4}$/.test(rawDate)) {
+    const [dd, mm, yyyy] = rawDate.split('.');
+    date = `${yyyy}-${mm}-${dd}`;
+  }
+  return {
+    rate,
+    date,
+    source: 'NBU',
+  };
+}
+
 /**
  * @param {Record<string, number>} fallback
  * @returns {Promise<{ rates: Record<string, number>, date: string, source: string }>}
@@ -130,11 +153,12 @@ async function fetchCentralBankRates(fallback) {
     }
   };
 
-  const [ecb, cbr, nbrb, nbk] = await Promise.allSettled([
+  const [ecb, cbr, nbrb, nbk, nbu] = await Promise.allSettled([
     fetchEcbUsdPln(),
     fetchCbrRubPerEur(),
     fetchNbrbBynPerEur(),
     fetchNbkKztPerEur(),
+    fetchNbuUahPerEur(),
   ]);
 
   if (ecb.status === 'fulfilled') {
@@ -163,6 +187,12 @@ async function fetchCentralBankRates(fallback) {
     apply('KZT', fallback.KZT, null, 'NBK', true);
   }
 
+  if (nbu.status === 'fulfilled') {
+    apply('UAH', nbu.value.rate, nbu.value.date, nbu.value.source);
+  } else {
+    apply('UAH', fallback.UAH, null, 'NBU', true);
+  }
+
   const date = dates.sort().reverse()[0] ?? todayIso();
 
   return {
@@ -178,4 +208,5 @@ module.exports = {
   fetchCbrRubPerEur,
   fetchNbrbBynPerEur,
   fetchNbkKztPerEur,
+  fetchNbuUahPerEur,
 };
