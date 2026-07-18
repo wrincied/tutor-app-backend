@@ -19,5 +19,14 @@ env:
       https://wrincied.github.io
     availability:
       - RUNTIME
+  # GitHub admin allowlist (same values as local .env — required for /api/admin/*)
+  - variable: ADMIN_GITHUB_EMAILS
+    value: wrincied@gmail.com
+    availability:
+      - RUNTIME
+  - variable: ADMIN_GITHUB_UIDS
+    value: SNuaQqiQIvgwKkHyzasv0KhZbAU2
+    availability:
+      - RUNTIME
 
 # Секреты (JWT, Stripe, Firebase SA) задайте в Firebase Console → App Hosting → Environment.
