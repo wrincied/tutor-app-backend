@@ -200,6 +200,16 @@ Base URL: `http://localhost:3001` (local) or App Hosting URL in production.
 | GET | `/users` | User list |
 | PUT | `/users/:id/subscription` | Set subscription status |
 | POST | `/users/:id/grant-trial` | Grant trial period |
+| GET/PUT | `/landing/legal/:doc` | CMS Datenschutz / Impressum (`datenschutz`, `impressum`) |
+
+Public (no auth):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/public/legal/:doc` | Published legal markdown |
+| GET | `/api/public/contact` | Kontakt email |
+
+Admin access also requires: GitHub provider, allowlist (`ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS`), and Firestore `role=super_admin`. 2FA is expected on the GitHub account (Firebase Identity Platform MFA is not used). `/app/admin` skips email verification and onboarding.
 
 ---
 
@@ -283,9 +293,12 @@ npm test
 ### 5. Utility scripts
 
 ```bash
-node scripts/set-super-admin.js <firebase-uid>
-node scripts/confirm-subscription.js <firebase-uid>
+node scripts/set-super-admin.js user@gmail.com
+# or by Firebase UID:
+node scripts/set-super-admin.js SNuaQqiQIvgwKkHyzasv0KhZbAU2
 ```
+
+Set `ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS` (use UID when GitHub’s email ≠ your admin contact email). Enable **GitHub** in Firebase Authentication. Sign in at `/admin-login` — keep 2FA on GitHub. No email-verify gate for `/app/admin`.
 
 ---
 
@@ -310,7 +323,9 @@ Set secrets (Stripe, service account, SMTP) in **Firebase Console → App Hostin
 - CORS is restricted to origins listed in `FRONTEND_URL`.
 - Stripe webhook route uses `express.raw()` and is mounted **before** `express.json()`.
 - Tutor data is isolated by `req.user.id` on every query.
-- Super-admin routes require `requireSuperAdmin` (role on user document).
+- Super-admin routes require `requireSuperAdmin`: allowlisted email, GitHub provider (`github.com`), and `role === 'super_admin'`.
+- Legal CMS bodies are markdown-only (HTML stripped on write).
+- User id path params are validated against a safe Firebase-id pattern.
 
 ---
 

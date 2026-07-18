@@ -1,5 +1,6 @@
 const DEFAULT_ORIGINS = [
   'http://localhost:4200',
+  'http://localhost:4300',
   'https://tutor-app--tutorassis.europe-west4.hosted.app',
   'https://tutorassis.web.app',
   'https://tutorassis.firebaseapp.com',

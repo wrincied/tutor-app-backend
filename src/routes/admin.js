@@ -13,6 +13,8 @@ const {
   normalizeDashboardWidgets,
 } = require('../utils/adminDashboard');
 const { listAllActivityLogs } = require('../utils/activityLog');
+const { registerLandingAdminRoutes } = require('./adminLanding');
+const { isSafeFirestoreId } = require('../utils/safeId');
 
 const TRIAL_GIFT_DAYS = 14;
 
@@ -103,6 +105,8 @@ function sortByTimestampDesc(rows, field) {
 
 router.use(auth, requireSuperAdmin);
 
+registerLandingAdminRoutes(router);
+
 router.get('/dashboard', async (req, res, next) => {
   try {
     const payload = await buildAdminDashboard(db);
@@ -138,6 +142,9 @@ router.put('/preferences', async (req, res, next) => {
 
 router.get('/users/:id/summary', async (req, res, next) => {
   try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
     const userRef = db.collection('users').doc(req.params.id);
     const userSnap = await userRef.get();
     if (!userSnap.exists) {
@@ -254,13 +261,19 @@ router.get('/users', async (req, res, next) => {
 
 router.put('/users/:id/subscription', async (req, res, next) => {
   try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
+    // Only allow known fields (mass-assignment guard)
+    const statusRaw = req.body?.subscription_status;
+    const trialEndsAtRaw = req.body?.trial_ends_at;
     const userRef = db.collection('users').doc(req.params.id);
     const userSnap = await userRef.get();
     if (!userSnap.exists) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const built = buildSubscriptionPatch(req.body?.subscription_status, req.body?.trial_ends_at);
+    const built = buildSubscriptionPatch(statusRaw, trialEndsAtRaw);
     if (!built.ok) {
       return res.status(400).json({ message: built.message });
     }
@@ -275,6 +288,9 @@ router.put('/users/:id/subscription', async (req, res, next) => {
 
 router.post('/users/:id/grant-trial', async (req, res, next) => {
   try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
     const userRef = db.collection('users').doc(req.params.id);
     const userSnap = await userRef.get();
     if (!userSnap.exists) {

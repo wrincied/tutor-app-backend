@@ -22,12 +22,14 @@ const financeRoutes = require('./src/routes/finance');
 const billingRoutes = require('./src/routes/billing');
 const adminRoutes = require('./src/routes/admin');
 const accountRoutes = require('./src/routes/account');
+const publicLegalRoutes = require('./src/routes/publicLegal');
 const errorHandler = require('./src/middleware/error');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/billing', billingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/account', accountRoutes);
+app.use('/api/public', publicLegalRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/lessons', lessonRoutes);
 app.use('/api/finance', financeRoutes);
