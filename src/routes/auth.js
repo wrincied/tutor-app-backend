@@ -25,7 +25,7 @@ async function ensureTutorUserDoc(req) {
   const email = String(req.user.email || '').trim().toLowerCase();
   const userRef = db.collection('users').doc(uid);
   const userSnap = await userRef.get();
-  const allowlisted = isAdminAllowlisted(uid, email);
+  const allowlisted = isAdminAllowlisted(uid);
   const role = allowlisted ? 'super_admin' : 'tutor';
 
   if (!userSnap.exists) {

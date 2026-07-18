@@ -19,11 +19,7 @@ env:
       https://wrincied.github.io
     availability:
       - RUNTIME
-  # GitHub admin allowlist (same values as local .env — required for /api/admin/*)
-  - variable: ADMIN_GITHUB_EMAILS
-    value: wrincied@gmail.com
-    availability:
-      - RUNTIME
+  # GitHub admin allowlist by Firebase UID only (email is not checked)
   - variable: ADMIN_GITHUB_UIDS
     value: SNuaQqiQIvgwKkHyzasv0KhZbAU2
     availability:

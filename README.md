@@ -209,7 +209,7 @@ Public (no auth):
 | GET | `/api/public/legal/:doc` | Published legal markdown |
 | GET | `/api/public/contact` | Kontakt email |
 
-Admin access also requires: GitHub provider, allowlist (`ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS`), and Firestore `role=super_admin`. 2FA is expected on the GitHub account (Firebase Identity Platform MFA is not used). `/app/admin` skips email verification and onboarding.
+Admin access also requires: GitHub provider, UID allowlist (`ADMIN_GITHUB_UIDS`), and Firestore `role=super_admin`. GitHub email is not used for access control. 2FA is expected on the GitHub account (Firebase Identity Platform MFA is not used). `/app/admin` skips email verification and onboarding.
 
 ---
 
@@ -298,7 +298,7 @@ node scripts/set-super-admin.js user@gmail.com
 node scripts/set-super-admin.js SNuaQqiQIvgwKkHyzasv0KhZbAU2
 ```
 
-Set `ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS` (use UID when GitHub’s email ≠ your admin contact email). Enable **GitHub** in Firebase Authentication. Sign in at `/admin-login` — keep 2FA on GitHub. No email-verify gate for `/app/admin`.
+Set `ADMIN_GITHUB_UIDS` to the Firebase Auth UID(s) of admin GitHub accounts. Enable **GitHub** in Firebase Authentication. Sign in at `/admin-login` — keep 2FA on GitHub. No email-verify gate for `/app/admin`.
 
 ---
 
@@ -323,7 +323,7 @@ Set secrets (Stripe, service account, SMTP) in **Firebase Console → App Hostin
 - CORS is restricted to origins listed in `FRONTEND_URL`.
 - Stripe webhook route uses `express.raw()` and is mounted **before** `express.json()`.
 - Tutor data is isolated by `req.user.id` on every query.
-- Super-admin routes require `requireSuperAdmin`: allowlisted email, GitHub provider (`github.com`), and `role === 'super_admin'`.
+- Super-admin routes require `requireSuperAdmin`: allowlisted Firebase UID (`ADMIN_GITHUB_UIDS`), GitHub provider (`github.com`), and `role === 'super_admin'`.
 - Legal CMS bodies are markdown-only (HTML stripped on write).
 - User id path params are validated against a safe Firebase-id pattern.
 

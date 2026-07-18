@@ -7,36 +7,20 @@ function parseCsvSet(raw) {
   );
 }
 
-function parseEmailAllowlist() {
-  const raw =
-    process.env.ADMIN_GITHUB_EMAILS ||
-    process.env.ADMIN_ALLOWLIST_EMAILS ||
-    process.env.ADMIN_GOOGLE_EMAILS ||
-    '';
-  return new Set([...parseCsvSet(raw)].map((email) => email.toLowerCase()));
-}
-
 function parseUidAllowlist() {
   return parseCsvSet(process.env.ADMIN_GITHUB_UIDS || '');
 }
 
-/** True if uid/email is in ADMIN_GITHUB_EMAILS and/or ADMIN_GITHUB_UIDS. */
-function isAdminAllowlisted(uid, email) {
-  const emails = parseEmailAllowlist();
+/** True if Firebase UID is in ADMIN_GITHUB_UIDS (email is ignored). */
+function isAdminAllowlisted(uid) {
   const uids = parseUidAllowlist();
-  if (emails.size === 0 && uids.size === 0) {
+  if (uids.size === 0) {
     return false;
   }
-  const normalizedEmail = String(email || '')
-    .trim()
-    .toLowerCase();
-  const emailOk = Boolean(normalizedEmail && emails.has(normalizedEmail));
-  const uidOk = Boolean(uid && uids.has(String(uid)));
-  return emailOk || uidOk;
+  return Boolean(uid && uids.has(String(uid)));
 }
 
 module.exports = {
-  parseEmailAllowlist,
   parseUidAllowlist,
   isAdminAllowlisted,
 };
