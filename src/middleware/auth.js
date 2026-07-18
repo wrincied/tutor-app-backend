@@ -17,6 +17,7 @@ async function auth(req, res, next) {
         message: 'Disposable email domains are not allowed',
       });
     }
+    req.authToken = decoded;
     req.user = {
       id: decoded.uid,
       email: decoded.email || null,
