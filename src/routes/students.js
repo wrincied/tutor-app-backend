@@ -13,7 +13,7 @@ const {
   writeActivityLog,
 } = require('../utils/activityLog');
 
-const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB']);
+const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB', 'KZT', 'UAH']);
 
 router.use(auth);
 router.use(requireVerifiedEmail);

@@ -17,7 +17,8 @@ const {
   normalizeCurrency,
   ratesForReport,
 } = require('../utils/currencyConvert');
-const { computeAustriaSelfEmployedProjection } = require('../utils/financeTax');
+const { computeTaxProjection } = require('../utils/financeTax');
+const { normalizeTaxMode } = require('../utils/userProfile');
 const { collectPatchChanges, listActivityLogs, writeActivityLog } = require('../utils/activityLog');
 const {
   classifyFinanceOrphan,
@@ -33,6 +34,7 @@ const COUNTRY_CURRENCY = {
   BY: 'BYN',
   KZ: 'KZT',
   US: 'USD',
+  UA: 'UAH',
 };
 
 function defaultCurrencyForUser(userData) {
@@ -325,7 +327,7 @@ router.get('/summary', async (req, res, next) => {
 
     const userData = userSnap.exists ? userSnap.data() : {};
     const country = String(userData.country_settings ?? 'AT').toUpperCase();
-    const taxMode = String(userData.tax_mode ?? 'none');
+    const taxMode = normalizeTaxMode(userData.tax_mode);
     const defaultCurrency = defaultCurrencyForUser(userData);
     const reportCurrency =
       req.query.currency && typeof req.query.currency === 'string'
@@ -487,7 +489,16 @@ router.get('/summary', async (req, res, next) => {
     }
 
     const grossProfit = totalIncome - totalExpenses;
-    const austriaProjection = computeAustriaSelfEmployedProjection(grossProfit);
+    const tax = computeTaxProjection(taxMode, { grossProfit, totalIncome });
+    const austria = taxMode === 'at-self-employed' && tax
+      ? {
+          socialInsuranceRate: tax.socialInsuranceRate,
+          socialInsurance: tax.socialInsurance,
+          taxableBase: tax.taxableBase,
+          incomeTax: tax.incomeTax,
+          netProfit: tax.netProfit,
+        }
+      : null;
 
     res.json({
       currency: reportCurrency,
@@ -520,7 +531,8 @@ router.get('/summary', async (req, res, next) => {
         scheduledByCurrency,
         combinedByCurrency,
       },
-      austria: taxMode === 'at-self-employed' ? austriaProjection : null,
+      tax,
+      austria,
       lessonsBreakdown,
       expensesBreakdown,
     });

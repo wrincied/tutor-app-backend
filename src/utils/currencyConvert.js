@@ -2,7 +2,7 @@
 
 const { fetchCentralBankRates } = require('./exchangeRateFetchers');
 
-const SUPPORTED = new Set(['EUR', 'USD', 'PLN', 'RUB', 'BYN', 'KZT']);
+const SUPPORTED = new Set(['EUR', 'USD', 'PLN', 'RUB', 'BYN', 'KZT', 'UAH']);
 
 /** Запасные курсы (единиц валюты за 1 EUR), если ЦБ недоступен. */
 const FALLBACK_EUR_RATES = {
@@ -12,6 +12,7 @@ const FALLBACK_EUR_RATES = {
   RUB: 98,
   BYN: 3.55,
   KZT: 520,
+  UAH: 45,
 };
 
 const CACHE_TTL_MS = 60 * 60 * 1000;

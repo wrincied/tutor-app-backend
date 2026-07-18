@@ -15,6 +15,7 @@ const ALLOWED_TAX_MODES = new Set([
   'ru-ip',
   'by-ip',
   'kz-ip',
+  'ua-fop3',
 ]);
 
 const ALLOWED_SUBSCRIPTION = new Set(['free', 'pro', 'trial']);
