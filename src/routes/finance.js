@@ -16,6 +16,7 @@ const {
   getExchangeRates,
   normalizeCurrency,
   ratesForReport,
+  FALLBACK_EUR_RATES,
 } = require('../utils/currencyConvert');
 const { computeTaxProjection } = require('../utils/financeTax');
 const { normalizeTaxMode } = require('../utils/userProfile');
@@ -309,6 +310,9 @@ router.get('/summary', async (req, res, next) => {
     const from = parseDateQuery(req.query.from);
     const to = parseDateQuery(req.query.to);
 
+    // Курсы стартуют параллельно с Firestore (кэш ~1ч — почти мгновенно).
+    const ratesPromise = getExchangeRates();
+
     const [lessonsSnap, expensesSnap, userSnap, studentsSnap] = await Promise.all([
       db.collection('lessons').where('tutor', '==', tutorId).get(),
       db.collection('expenses').where('tutor', '==', tutorId).get(),
@@ -333,7 +337,23 @@ router.get('/summary', async (req, res, next) => {
       req.query.currency && typeof req.query.currency === 'string'
         ? normalizeCurrency(req.query.currency)
         : defaultCurrency;
-    const { rates: eurRates, date: ratesDate, source: ratesSource } = await getExchangeRates();
+
+    const usedCurrencies = new Set([reportCurrency]);
+    for (const lesson of lessons) {
+      usedCurrencies.add(normalizeCurrency(lesson.lesson_currency));
+    }
+    expensesSnap.forEach((doc) => {
+      usedCurrencies.add(expenseStoredCurrency(doc.data(), defaultCurrency));
+    });
+    const needsFx = [...usedCurrencies].some((code) => code !== reportCurrency);
+
+    const { rates: eurRates, date: ratesDate, source: ratesSource } = needsFx
+      ? await ratesPromise
+      : {
+          rates: FALLBACK_EUR_RATES,
+          date: new Date().toISOString().slice(0, 10),
+          source: 'same-currency',
+        };
     const exchangeRatesMeta = {
       base: 'EUR',
       reportCurrency,
