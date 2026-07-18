@@ -1,32 +1,10 @@
 const { db } = require('../firebase');
-
-function parseCsvSet(raw) {
-  return new Set(
-    String(raw || '')
-      .split(',')
-      .map((item) => String(item || '').trim())
-      .filter(Boolean),
-  );
-}
-
-function parseEmailAllowlist() {
-  const raw =
-    process.env.ADMIN_GITHUB_EMAILS ||
-    process.env.ADMIN_ALLOWLIST_EMAILS ||
-    process.env.ADMIN_GOOGLE_EMAILS ||
-    '';
-  return new Set(
-    [...parseCsvSet(raw)].map((email) => email.toLowerCase()),
-  );
-}
-
-function parseUidAllowlist() {
-  return parseCsvSet(process.env.ADMIN_GITHUB_UIDS || '');
-}
+const { parseUidAllowlist } = require('../utils/adminAllowlist');
 
 /**
- * After auth middleware: GitHub provider + (email allowlist OR uid allowlist) + super_admin.
+ * After auth middleware: GitHub provider + UID allowlist + super_admin.
  * No Firebase email verification / Identity Platform MFA required.
+ * GitHub email is not used for access control.
  */
 async function requireSuperAdmin(req, res, next) {
   try {
@@ -48,23 +26,18 @@ async function requireSuperAdmin(req, res, next) {
       });
     }
 
-    const emails = parseEmailAllowlist();
     const uids = parseUidAllowlist();
-    if (emails.size === 0 && uids.size === 0) {
-      console.error(
-        '[requireSuperAdmin] Set ADMIN_GITHUB_EMAILS and/or ADMIN_GITHUB_UIDS',
-      );
+    if (uids.size === 0) {
+      console.error('[requireSuperAdmin] Set ADMIN_GITHUB_UIDS');
       return res.status(403).json({
         message: 'Admin allowlist is not configured',
         code: 'ALLOWLIST_NOT_CONFIGURED',
       });
     }
 
-    const emailOk = email && emails.has(email);
-    const uidOk = uids.has(uid);
-    if (!emailOk && !uidOk) {
+    if (!uids.has(uid)) {
       console.warn(
-        `[requireSuperAdmin] NOT_ALLOWLISTED uid=${uid} email=${email || '(none)'} provider=${provider}`,
+        `[requireSuperAdmin] NOT_ALLOWLISTED uid=${uid} provider=${provider}`,
       );
       return res.status(403).json({
         message: 'Forbidden',

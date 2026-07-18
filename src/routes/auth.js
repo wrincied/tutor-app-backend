@@ -16,6 +16,7 @@ const {
   normalizeWorkspace,
   normalizeWorkingHours,
 } = require('../utils/userWorkspaceSettings');
+const { isAdminAllowlisted } = require('../utils/adminAllowlist');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
 
@@ -24,6 +25,8 @@ async function ensureTutorUserDoc(req) {
   const email = String(req.user.email || '').trim().toLowerCase();
   const userRef = db.collection('users').doc(uid);
   const userSnap = await userRef.get();
+  const allowlisted = isAdminAllowlisted(uid);
+  const role = allowlisted ? 'super_admin' : 'tutor';
 
   if (!userSnap.exists) {
     await userRef.set({
@@ -39,7 +42,7 @@ async function ensureTutorUserDoc(req) {
       subscription_status: 'free',
       workspace: DEFAULT_WORKSPACE,
       workingHours: DEFAULT_WORKING_HOURS,
-      role: 'tutor',
+      role,
       onboarding_completed: false,
       data_consent_accepted: null,
       marketing_cookies_accepted: null,
@@ -47,11 +50,16 @@ async function ensureTutorUserDoc(req) {
       updatedAt: FieldValue.serverTimestamp(),
     });
   } else {
-    await userRef.update({
+    const patch = {
       email,
       email_verified: req.user.email_verified,
       updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    // Keep allowlisted GitHub admins as super_admin even if role was reset to tutor.
+    if (allowlisted && String(userSnap.data()?.role ?? '') !== 'super_admin') {
+      patch.role = 'super_admin';
+    }
+    await userRef.update(patch);
   }
 
   return userRef;
