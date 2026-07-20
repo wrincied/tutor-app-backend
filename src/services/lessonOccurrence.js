@@ -1,6 +1,6 @@
 const { db, FieldValue } = require('../firebase');
 const { normalizeLessonStatus, isCompletedStatus } = require('../utils/lessonSnapshot');
-const { normalizeBillingType } = require('../utils/studentBilling');
+const { normalizeBillingType, packageDebitAmount, normalizeRateUnit } = require('../utils/studentBilling');
 const { appendStudentBalanceLog } = require('../utils/activityLog');
 const { LESSON_BILLING_BUFFER_MS } = require('../utils/lessonBillingConstants');
 const { lessonOccurrenceIntervals, dayKeyFromDate } = require('../utils/lessonRecurrence');
@@ -59,9 +59,11 @@ function debitPackageOccurrence(batch, {
   studentName,
   lessonId,
   occurrenceDate,
+  amount = 1,
 }) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(-1),
+    balance_lessons: FieldValue.increment(-units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
@@ -72,7 +74,7 @@ function debitPackageOccurrence(batch, {
     studentId,
     studentName,
     lessonId,
-    amount: -1,
+    amount: -units,
     reason: 'lesson_completed_occurrence',
     occurrenceDate,
   });
@@ -86,9 +88,11 @@ function creditPackageOccurrence(batch, {
   studentName,
   lessonId,
   occurrenceDate,
+  amount = 1,
 }) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(1),
+    balance_lessons: FieldValue.increment(units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
@@ -99,7 +103,7 @@ function creditPackageOccurrence(batch, {
     studentId,
     studentName,
     lessonId,
-    amount: 1,
+    amount: units,
     reason: 'lesson_occurrence_uncompleted_refund',
     occurrenceDate,
   });
@@ -113,9 +117,11 @@ function debitPostpaidOccurrence(batch, {
   studentName,
   lessonId,
   occurrenceDate,
+  amount = 1,
 }) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    unpaid_lessons_count: FieldValue.increment(1),
+    unpaid_lessons_count: FieldValue.increment(units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
@@ -126,7 +132,7 @@ function debitPostpaidOccurrence(batch, {
     studentId,
     studentName,
     lessonId,
-    amount: 1,
+    amount: units,
     reason: 'lesson_completed_postpaid_occurrence',
     occurrenceDate,
   });
@@ -140,9 +146,11 @@ function creditPostpaidOccurrence(batch, {
   studentName,
   lessonId,
   occurrenceDate,
+  amount = 1,
 }) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    unpaid_lessons_count: FieldValue.increment(-1),
+    unpaid_lessons_count: FieldValue.increment(-units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
@@ -153,9 +161,16 @@ function creditPostpaidOccurrence(batch, {
     studentId,
     studentName,
     lessonId,
-    amount: -1,
+    amount: -units,
     reason: 'lesson_occurrence_uncompleted_postpaid',
     occurrenceDate,
+  });
+}
+
+function occurrenceDebitUnits(studentData, lesson) {
+  return packageDebitAmount({
+    rateUnit: normalizeRateUnit(studentData?.rate_unit),
+    lessonDuration: lesson?.lesson_duration,
   });
 }
 
@@ -207,6 +222,7 @@ async function debitRecurringOccurrenceIfDue({
   const billingType = normalizeBillingType(studentSnap?.data()?.billing_type);
   const studentId = existing.student_id;
   const studentName = studentSnap?.data()?.name ?? existing.student_name;
+  const units = occurrenceDebitUnits(studentSnap?.data(), existing);
   const batch = db.batch();
 
   if (billingType === 'package') {
@@ -218,6 +234,7 @@ async function debitRecurringOccurrenceIfDue({
       studentName,
       lessonId,
       occurrenceDate,
+      amount: units,
     });
   } else {
     debitPostpaidOccurrence(batch, {
@@ -228,6 +245,7 @@ async function debitRecurringOccurrenceIfDue({
       studentName,
       lessonId,
       occurrenceDate,
+      amount: units,
     });
   }
   await batch.commit();
@@ -253,6 +271,7 @@ async function applyRecurringOccurrenceStatus({
   const wasCompleted = completedDates.includes(occurrenceDate);
   const billingType = normalizeBillingType(studentSnap?.data()?.billing_type);
   const lessonId = lessonRef.id;
+  const units = occurrenceDebitUnits(studentSnap?.data(), existing);
 
   const batch = db.batch();
   const studentId = existing.student_id;
@@ -290,6 +309,7 @@ async function applyRecurringOccurrenceStatus({
           studentName,
           lessonId,
           occurrenceDate,
+          amount: units,
         });
       } else {
         debitPostpaidOccurrence(batch, {
@@ -300,6 +320,7 @@ async function applyRecurringOccurrenceStatus({
           studentName,
           lessonId,
           occurrenceDate,
+          amount: units,
         });
       }
     }
@@ -329,6 +350,7 @@ async function applyRecurringOccurrenceStatus({
         studentName,
         lessonId,
         occurrenceDate,
+        amount: units,
       });
     } else {
       debitPostpaidOccurrence(batch, {
@@ -339,6 +361,7 @@ async function applyRecurringOccurrenceStatus({
         studentName,
         lessonId,
         occurrenceDate,
+        amount: units,
       });
     }
     await batch.commit();
@@ -362,6 +385,7 @@ async function applyRecurringOccurrenceStatus({
         studentName,
         lessonId: lessonRef.id,
         occurrenceDate,
+        amount: units,
       });
     } else {
       creditPostpaidOccurrence(batch, {
@@ -372,6 +396,7 @@ async function applyRecurringOccurrenceStatus({
         studentName,
         lessonId: lessonRef.id,
         occurrenceDate,
+        amount: units,
       });
     }
     await batch.commit();
@@ -398,6 +423,7 @@ async function applyRecurringOccurrenceStatus({
         studentName,
         lessonId: lessonRef.id,
         occurrenceDate,
+        amount: units,
       });
     }
     await batch.commit();
@@ -435,6 +461,7 @@ async function applyRecurringOccurrenceStatus({
             studentName,
             lessonId,
             occurrenceDate,
+            amount: units,
           });
         } else {
           creditPostpaidOccurrence(batch, {
@@ -445,6 +472,7 @@ async function applyRecurringOccurrenceStatus({
             studentName,
             lessonId,
             occurrenceDate,
+            amount: units,
           });
         }
       }

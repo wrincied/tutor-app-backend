@@ -148,6 +148,9 @@ async function processAutoComplete(now = Date.now()) {
       balanceDebited: Boolean(lesson.balance_debited),
       billingProcessed: Boolean(lesson.billing_processed),
       studentBillingType: student.billing_type,
+      studentRateUnit: student.rate_unit,
+      lessonDuration: lesson.lesson_duration,
+      balanceUnitsDebited: lesson.balance_units_debited,
       autoDebitEnabled: student.auto_debit_enabled !== false,
       manualCompletion: true,
     });
@@ -171,7 +174,12 @@ async function processAutoComplete(now = Date.now()) {
     const fresh = await loadStudent(student._id);
     const balance = Number(fresh?.balance_lessons) || 0;
     if ((fresh?.billing_type || 'package') !== 'postpaid') {
-      await notifyBalance({ studentId: student._id, lessonsLeft: balance, tutorName });
+      await notifyBalance({
+        studentId: student._id,
+        lessonsLeft: balance,
+        rateUnit: fresh?.rate_unit,
+        tutorName,
+      });
     }
 
     await lessonRef.update({

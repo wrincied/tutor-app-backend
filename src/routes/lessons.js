@@ -222,6 +222,8 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
         balanceDebited: false,
         billingProcessed: false,
         studentBillingType: studentData.billing_type,
+        studentRateUnit: studentData.rate_unit,
+        lessonDuration: lessonData.lesson_duration,
         shouldDeduct: shouldDeductOnCreate,
         autoDebitEnabled: studentData.auto_debit_enabled !== false,
         manualCompletion: req.body.manual_completion !== false,
@@ -503,6 +505,10 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           balanceDebited: existing.balance_debited,
           billingProcessed: existing.billing_processed,
           studentBillingType: studentSnap.data().billing_type,
+          studentRateUnit: studentSnap.data().rate_unit,
+          lessonDuration:
+            patch.lesson_duration !== undefined ? patch.lesson_duration : existing.lesson_duration,
+          balanceUnitsDebited: existing.balance_units_debited,
           shouldDeduct,
           shouldRefund,
           autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
@@ -583,8 +589,12 @@ router.delete('/:id', async (req, res, next) => {
       const studentRef = db.collection('students').doc(existing.student_id);
       const studentSnap = await studentRef.get();
       if (studentSnap.exists && studentSnap.data().tutor_id === tutorId) {
+        const units =
+          existing.balance_units_debited != null && Number(existing.balance_units_debited) > 0
+            ? Math.round(Number(existing.balance_units_debited) * 100) / 100
+            : 1;
         batch.update(studentRef, {
-          balance_lessons: FieldValue.increment(1),
+          balance_lessons: FieldValue.increment(units),
           updatedAt: FieldValue.serverTimestamp(),
         });
         appendBalanceLog(batch, {
@@ -592,7 +602,7 @@ router.delete('/:id', async (req, res, next) => {
           studentId: existing.student_id,
           studentName: studentSnap.data().name,
           lessonId: lessonRef.id,
-          amount: 1,
+          amount: units,
           reason: 'lesson_deleted_refund',
         });
       }

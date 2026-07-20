@@ -194,21 +194,32 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
     const rate = Number(student.rate_per_hour) || 0;
     const currency = student.rate_currency || 'EUR';
     const billingType = student.billing_type === 'postpaid' ? 'postpaid' : 'package';
+    const rateUnit = student.rate_unit === 'lesson' ? 'lesson' : 'hour';
 
     const lessonsSnap = await db.collection('lessons').where('student_id', '==', studentId).get();
     let completed = 0;
     let earned = 0;
+    let unitsConsumed = 0;
     lessonsSnap.forEach((doc) => {
       const lesson = enrichLessonSnapshot({ _id: doc.id, ...doc.data() }, new Map([[studentId, student]]));
       if (normalizeLessonStatus(lesson.status) === 'completed') {
         completed += 1;
         earned += lessonRevenueFromSnapshot(lesson);
+        if (lesson.balance_units_debited != null && Number(lesson.balance_units_debited) > 0) {
+          unitsConsumed += Number(lesson.balance_units_debited);
+        } else if (rateUnit === 'hour') {
+          const minutes = Number(lesson.lesson_duration) || 60;
+          unitsConsumed += Math.round((minutes / 60) * 100) / 100;
+        } else {
+          unitsConsumed += 1;
+        }
       }
     });
+    unitsConsumed = Math.round(unitsConsumed * 100) / 100;
 
-    // Пополнено ≈ остаток + проведённые (для абонемента).
-    const toppedUp = billingType === 'package' ? balance + completed : completed;
-    const rateUnit = student.rate_unit === 'lesson' ? 'lesson' : 'hour';
+    // Пополнено ≈ остаток + списанные единицы (занятия или часы).
+    const toppedUp =
+      billingType === 'package' ? Math.round((balance + unitsConsumed) * 100) / 100 : completed;
     // hour: только фактическая выручка по урокам (учитывает длительность).
     // lesson: фикс × число пополнений/проведённых.
     const paidAmount =
@@ -220,6 +231,7 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
       student_id: studentId,
       billing_type: billingType,
       balance_lessons: balance,
+      balance_unit: rateUnit,
       unpaid_lessons_count: unpaid,
       credit_limit: creditLimit,
       lessons_completed: completed,

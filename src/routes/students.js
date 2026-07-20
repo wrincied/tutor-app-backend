@@ -6,7 +6,7 @@ const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
-const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt } = require('../utils/studentBilling');
+const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt, parseBalanceAmount } = require('../utils/studentBilling');
 const {
   collectPatchChanges,
   listActivityLogs,
@@ -161,7 +161,7 @@ router.post('/', async (req, res, next) => {
     const billingType = normalizeBillingType(billing_type);
     const rateUnit = normalizeRateUnit(rate_unit);
     const initialBalance =
-      billingType === 'package' ? parseNonNegativeInt(balance_lessons, 0) : 0;
+      billingType === 'package' ? parseBalanceAmount(balance_lessons, rateUnit, 0) : 0;
     const initialCreditLimit =
       billingType === 'postpaid' ? parseNonNegativeInt(credit_limit, 0) : 0;
     const botActive = Boolean(bot_active);
@@ -281,7 +281,11 @@ router.put('/:id', async (req, res, next) => {
       patch.rate_unit = normalizeRateUnit(rate_unit);
     }
     if (balance_lessons !== undefined) {
-      patch.balance_lessons = parseNonNegativeInt(balance_lessons, 0);
+      const rateForBalance =
+        rate_unit !== undefined
+          ? normalizeRateUnit(rate_unit)
+          : normalizeRateUnit(before.rate_unit);
+      patch.balance_lessons = parseBalanceAmount(balance_lessons, rateForBalance, 0);
     }
     if (credit_limit !== undefined) {
       patch.credit_limit = parseNonNegativeInt(credit_limit, 0);
@@ -385,10 +389,14 @@ router.post('/:id/topup', async (req, res, next) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     const before = studentSnap.data();
-    const rounded = Math.round(lessonsToAdd);
+    const rateUnit = normalizeRateUnit(before.rate_unit);
+    const added = parseBalanceAmount(lessonsToAdd, rateUnit, 0);
+    if (added <= 0) {
+      return res.status(400).json({ message: 'lessons must be a positive number' });
+    }
 
     await studentRef.update({
-      balance_lessons: FieldValue.increment(rounded),
+      balance_lessons: FieldValue.increment(added),
       updatedAt: FieldValue.serverTimestamp(),
     });
     const updatedSnap = await studentRef.get();
@@ -407,20 +415,22 @@ router.post('/:id/topup', async (req, res, next) => {
           to: Number(updated.balance_lessons) || 0,
         },
       ],
-      metadata: { added: rounded },
+      metadata: { added, rate_unit: rateUnit },
     });
     if (updated.bot_active) {
       const currency = updated.rate_currency || '';
       const rate = Number(updated.rate_per_hour) || 0;
+      const unitLabel = rateUnit === 'lesson' ? 'ур.' : 'ч';
       const amountLabel =
         rate > 0 && currency
-          ? `${(rate * rounded).toFixed(rate % 1 ? 2 : 0)} ${currency}`
-          : `+${rounded} ур.`;
+          ? `${(rate * added).toFixed(rate % 1 || added % 1 ? 2 : 0)} ${currency}`
+          : `+${added} ${unitLabel}`;
       // Не блокируем ответ CRM, если бот недоступен.
       notifyPayment({
         studentId: updated._id,
         amountLabel,
-        lessonsAdded: rounded,
+        lessonsAdded: added,
+        rateUnit,
         tutorName: await resolveTutorName(tutorId),
       }).catch(() => {});
     }

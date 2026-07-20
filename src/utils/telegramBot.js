@@ -65,23 +65,25 @@ async function setBotActive({ studentId, botActive }) {
   });
 }
 
-async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName }) {
+async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, rateUnit }) {
   return botFetch('/v1/notify/payment', {
     body: {
       student_id: studentId,
       amount_label: amountLabel || 'пополнение',
       lessons_added: Number(lessonsAdded) || 0,
       tutor_name: tutorName || null,
+      rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
     },
   });
 }
 
-async function notifyBalance({ studentId, lessonsLeft, tutorName }) {
+async function notifyBalance({ studentId, lessonsLeft, tutorName, rateUnit }) {
   return botFetch('/v1/notify/balance', {
     body: {
       student_id: studentId,
       lessons_left: Number(lessonsLeft) || 0,
       tutor_name: tutorName || null,
+      rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
     },
   });
 }

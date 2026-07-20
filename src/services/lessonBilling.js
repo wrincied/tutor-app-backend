@@ -1,7 +1,11 @@
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const { normalizeLessonStatus, isCompletedStatus } = require('../utils/lessonSnapshot');
-const { normalizeBillingType } = require('../utils/studentBilling');
+const {
+  normalizeBillingType,
+  normalizeRateUnit,
+  packageDebitAmount,
+} = require('../utils/studentBilling');
 const { appendStudentBalanceLog } = require('../utils/activityLog');
 
 function isMissedOrCanceledStatus(status) {
@@ -33,17 +37,38 @@ function appendBalanceLog(batch, { tutorId, studentId, studentName, lessonId, am
   appendStudentBalanceLog(batch, { tutorId, studentId, studentName, lessonId, amount, reason });
 }
 
+function resolveDebitAmount({ rateUnit, lessonDuration, amount }) {
+  if (amount != null && Number.isFinite(Number(amount)) && Number(amount) > 0) {
+    return Math.round(Number(amount) * 100) / 100;
+  }
+  return packageDebitAmount({ rateUnit, lessonDuration });
+}
+
 /**
- * Списание/возврат 1 урока в batch (без commit).
+ * Списание единиц абонемента (занятия или часы) в batch.
  */
-function applyBalanceDebit(batch, { tutorId, studentRef, lessonRef, studentId, studentName, lessonId, reason }) {
+function applyBalanceDebit(
+  batch,
+  {
+    tutorId,
+    studentRef,
+    lessonRef,
+    studentId,
+    studentName,
+    lessonId,
+    reason,
+    amount = 1,
+  },
+) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(-1),
+    balance_lessons: FieldValue.increment(-units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
     balance_debited: true,
     billing_processed: true,
+    balance_units_debited: units,
     updatedAt: FieldValue.serverTimestamp(),
   });
   appendBalanceLog(batch, {
@@ -51,19 +76,33 @@ function applyBalanceDebit(batch, { tutorId, studentRef, lessonRef, studentId, s
     studentId,
     studentName,
     lessonId,
-    amount: -1,
+    amount: -units,
     reason,
   });
 }
 
-function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, studentName, lessonId, reason }) {
+function applyBalanceRefund(
+  batch,
+  {
+    tutorId,
+    studentRef,
+    lessonRef,
+    studentId,
+    studentName,
+    lessonId,
+    reason,
+    amount = 1,
+  },
+) {
+  const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(1),
+    balance_lessons: FieldValue.increment(units),
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
     balance_debited: false,
     billing_processed: false,
+    balance_units_debited: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
   });
   appendBalanceLog(batch, {
@@ -71,7 +110,7 @@ function applyBalanceRefund(batch, { tutorId, studentRef, lessonRef, studentId, 
     studentId,
     studentName,
     lessonId,
-    amount: 1,
+    amount: units,
     reason,
   });
 }
@@ -91,6 +130,9 @@ function applyLessonStatusBilling(batch, {
   balanceDebited,
   billingProcessed,
   studentBillingType,
+  studentRateUnit,
+  lessonDuration,
+  balanceUnitsDebited,
   shouldDeduct,
   shouldRefund,
   autoDebitEnabled,
@@ -107,6 +149,12 @@ function applyLessonStatusBilling(batch, {
   const alreadyDebited = Boolean(balanceDebited);
   const wasBillingProcessed = Boolean(billingProcessed);
   const billingType = normalizeBillingType(studentBillingType);
+  const rateUnit = normalizeRateUnit(studentRateUnit);
+  const debitAmount = packageDebitAmount({ rateUnit, lessonDuration });
+  const refundAmount =
+    balanceUnitsDebited != null && Number(balanceUnitsDebited) > 0
+      ? Math.round(Number(balanceUnitsDebited) * 100) / 100
+      : debitAmount;
 
   if (willBeCompleted && !wasCompleted) {
     if (alreadyDebited || wasBillingProcessed) {
@@ -129,26 +177,28 @@ function applyLessonStatusBilling(batch, {
           studentName,
           lessonId,
           reason: 'lesson_completed',
+          amount: debitAmount,
         });
-        return { debited: true };
+        return { debited: true, amount: debitAmount };
       }
       batch.update(studentRef, {
-        unpaid_lessons_count: FieldValue.increment(1),
+        unpaid_lessons_count: FieldValue.increment(debitAmount),
         updatedAt: FieldValue.serverTimestamp(),
       });
       batch.update(lessonRef, {
         billing_processed: true,
         balance_debited: false,
+        balance_units_debited: debitAmount,
       });
       appendBalanceLog(batch, {
         tutorId,
         studentId,
         studentName,
         lessonId,
-        amount: 1,
+        amount: debitAmount,
         reason: 'lesson_completed_postpaid',
       });
-      return { debited: true };
+      return { debited: true, amount: debitAmount };
     }
     batch.update(lessonRef, {
       completed_at: FieldValue.serverTimestamp(),
@@ -170,8 +220,9 @@ function applyLessonStatusBilling(batch, {
           studentName,
           lessonId,
           reason: balanceLogReason(nextStatus, true, false),
+          amount: debitAmount,
         });
-        return { debited: true };
+        return { debited: true, amount: debitAmount };
       }
       return { skipped: true, alreadyDebited: true };
     }
@@ -184,8 +235,9 @@ function applyLessonStatusBilling(batch, {
         studentName,
         lessonId,
         reason: balanceLogReason(nextStatus, false, true),
+        amount: refundAmount,
       });
-      return { refunded: true };
+      return { refunded: true, amount: refundAmount };
     }
     return { skipped: true };
   }
@@ -208,8 +260,9 @@ function applyLessonStatusBilling(batch, {
       studentName,
       lessonId,
       reason: 'lesson_balance_refund',
+      amount: refundAmount,
     });
-    return { refunded: true };
+    return { refunded: true, amount: refundAmount };
   }
 
   // Восстановление урока (missed/canceled → scheduled и т.п.).
@@ -223,8 +276,9 @@ function applyLessonStatusBilling(batch, {
         studentName,
         lessonId,
         reason: 'lesson_restored_refund',
+        amount: refundAmount,
       });
-      return { refunded: true };
+      return { refunded: true, amount: refundAmount };
     }
     return { skipped: true };
   }
@@ -240,17 +294,19 @@ function applyLessonStatusBilling(batch, {
           studentName,
           lessonId,
           reason: 'lesson_uncompleted_refund',
+          amount: refundAmount,
         });
-        return { refunded: true };
+        return { refunded: true, amount: refundAmount };
       }
       batch.update(studentRef, {
-        unpaid_lessons_count: FieldValue.increment(-1),
+        unpaid_lessons_count: FieldValue.increment(-refundAmount),
         updatedAt: FieldValue.serverTimestamp(),
       });
       batch.update(lessonRef, {
         billing_processed: false,
         billing_processed_at: FieldValue.delete(),
         completed_at: FieldValue.delete(),
+        balance_units_debited: FieldValue.delete(),
         updatedAt: FieldValue.serverTimestamp(),
       });
       appendBalanceLog(batch, {
@@ -258,10 +314,10 @@ function applyLessonStatusBilling(batch, {
         studentId,
         studentName,
         lessonId,
-        amount: -1,
+        amount: -refundAmount,
         reason: 'lesson_uncompleted_postpaid_reversal',
       });
-      return { postpaidReversed: true };
+      return { postpaidReversed: true, amount: refundAmount };
     }
     batch.update(lessonRef, {
       completed_at: FieldValue.delete(),
@@ -328,6 +384,9 @@ async function cancelLessonWithBilling({
     balanceDebited: existing.balance_debited,
     billingProcessed: existing.billing_processed,
     studentBillingType: studentSnap.data().billing_type,
+    studentRateUnit: studentSnap.data().rate_unit,
+    lessonDuration: existing.lesson_duration,
+    balanceUnitsDebited: existing.balance_units_debited,
     shouldDeduct: Boolean(shouldDeduct),
     autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
   });
@@ -371,4 +430,5 @@ module.exports = {
   applyBalanceRefund,
   appendBalanceLog,
   cancelLessonWithBilling,
+  resolveDebitAmount,
 };
