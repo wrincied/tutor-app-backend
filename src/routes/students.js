@@ -92,7 +92,8 @@ router.get('/', async (req, res, next) => {
       }
     }
     if (backfill.length) {
-      await Promise.all(backfill);
+      // Не блокируем ответ: цвета уже проставлены в payload.
+      Promise.all(backfill).catch(() => {});
     }
     students.sort((left, right) => {
       const l = left.createdAt ? Date.parse(left.createdAt) : 0;
