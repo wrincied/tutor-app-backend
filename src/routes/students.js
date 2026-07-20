@@ -12,8 +12,52 @@ const {
   listActivityLogs,
   writeActivityLog,
 } = require('../utils/activityLog');
+const {
+  newLinkToken,
+  registerStudentLink,
+  setBotActive,
+  notifyPayment,
+  withTelegramDeepLink,
+} = require('../utils/telegramBot');
+const { resolveTutorName } = require('../utils/tutorName');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB', 'KZT', 'UAH']);
+
+function normalizeMeetingLink(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.length > 2000) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+async function ensureTelegramLink(studentId, { name, botActive, existingToken, tutorId }) {
+  if (!botActive) {
+    if (existingToken) {
+      await setBotActive({ studentId, botActive: false });
+    }
+    return { telegram_link_token: existingToken || null };
+  }
+  const token = existingToken || newLinkToken();
+  const tutorName = tutorId ? await resolveTutorName(tutorId) : null;
+  await registerStudentLink({
+    studentId,
+    linkToken: token,
+    studentName: name,
+    tutorName,
+    botActive: true,
+  });
+  return { telegram_link_token: token };
+}
 
 router.use(auth);
 router.use(requireVerifiedEmail);
@@ -55,7 +99,7 @@ router.get('/', async (req, res, next) => {
       const r = right.createdAt ? Date.parse(right.createdAt) : 0;
       return r - l;
     });
-    res.json(students);
+    res.json(students.map(withTelegramDeepLink));
   } catch (error) {
     next(error);
   }
@@ -68,7 +112,7 @@ router.get('/:id', async (req, res, next) => {
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
       return res.status(404).json({ message: 'Student not found' });
     }
-    res.json(serializeDoc(studentSnap));
+    res.json(withTelegramDeepLink(serializeDoc(studentSnap)));
   } catch (error) {
     next(error);
   }
@@ -87,6 +131,8 @@ router.post('/', async (req, res, next) => {
       rate_unit,
       balance_lessons,
       credit_limit,
+      bot_active,
+      meeting_link,
     } = req.body;
 
     const normalizedName = name ? String(name).trim() : '';
@@ -118,6 +164,11 @@ router.post('/', async (req, res, next) => {
       billingType === 'package' ? parseNonNegativeInt(balance_lessons, 0) : 0;
     const initialCreditLimit =
       billingType === 'postpaid' ? parseNonNegativeInt(credit_limit, 0) : 0;
+    const botActive = Boolean(bot_active);
+    const meetingLink = normalizeMeetingLink(meeting_link);
+    if (meeting_link !== undefined && meetingLink === undefined) {
+      return res.status(400).json({ message: 'Invalid meeting_link' });
+    }
 
     const createdRef = await db.collection('students').add({
       tutor_id: tutorId,
@@ -131,14 +182,30 @@ router.post('/', async (req, res, next) => {
       credit_limit: initialCreditLimit,
       unpaid_lessons_count: 0,
       auto_debit_enabled: true,
-      bot_active: false,
+      bot_active: botActive,
+      meeting_link: meetingLink ?? null,
       timezone: timezone ? String(timezone) : 'Europe/Vienna',
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
+    if (botActive) {
+      const { telegram_link_token } = await ensureTelegramLink(createdRef.id, {
+        name: normalizedName,
+        botActive: true,
+        existingToken: null,
+        tutorId,
+      });
+      if (telegram_link_token) {
+        await createdRef.update({
+          telegram_link_token,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
     const createdSnap = await createdRef.get();
-    const created = serializeDoc(createdSnap);
+    const created = withTelegramDeepLink(serializeDoc(createdSnap));
     await writeActivityLog({
       tutorId,
       category: 'students',
@@ -181,6 +248,8 @@ router.put('/:id', async (req, res, next) => {
       credit_limit,
       color_hex,
       bot_active,
+      meeting_link,
+      telegram_unlink_pending,
     } = req.body;
     const patch = {
       updatedAt: FieldValue.serverTimestamp(),
@@ -230,10 +299,36 @@ router.put('/:id', async (req, res, next) => {
     if (bot_active !== undefined) {
       patch.bot_active = Boolean(bot_active);
     }
+    if (meeting_link !== undefined) {
+      const meetingLink = normalizeMeetingLink(meeting_link);
+      if (meetingLink === undefined) {
+        return res.status(400).json({ message: 'Invalid meeting_link' });
+      }
+      patch.meeting_link = meetingLink;
+    }
+    if (telegram_unlink_pending !== undefined) {
+      patch.telegram_unlink_pending = Boolean(telegram_unlink_pending);
+      if (!patch.telegram_unlink_pending) {
+        patch.telegram_unlinked_username = null;
+      }
+    }
+
+    const nextBotActive =
+      bot_active !== undefined ? Boolean(bot_active) : Boolean(before.bot_active);
+    const nextName = patch.name !== undefined ? patch.name : before.name;
+    const { telegram_link_token } = await ensureTelegramLink(req.params.id, {
+      name: nextName,
+      botActive: nextBotActive,
+      existingToken: before.telegram_link_token || null,
+      tutorId,
+    });
+    if (nextBotActive && telegram_link_token) {
+      patch.telegram_link_token = telegram_link_token;
+    }
 
     await studentRef.update(patch);
     const updatedSnap = await studentRef.get();
-    const updated = serializeDoc(updatedSnap);
+    const updated = withTelegramDeepLink(serializeDoc(updatedSnap));
     const changes = collectPatchChanges(before, patch);
     if (changes.length) {
       await writeActivityLog({
@@ -314,7 +409,22 @@ router.post('/:id/topup', async (req, res, next) => {
       ],
       metadata: { added: rounded },
     });
-    res.json(updated);
+    if (updated.bot_active) {
+      const currency = updated.rate_currency || '';
+      const rate = Number(updated.rate_per_hour) || 0;
+      const amountLabel =
+        rate > 0 && currency
+          ? `${(rate * rounded).toFixed(rate % 1 ? 2 : 0)} ${currency}`
+          : `+${rounded} ур.`;
+      // Не блокируем ответ CRM, если бот недоступен.
+      notifyPayment({
+        studentId: updated._id,
+        amountLabel,
+        lessonsAdded: rounded,
+        tutorName: await resolveTutorName(tutorId),
+      }).catch(() => {});
+    }
+    res.json(withTelegramDeepLink(updated));
   } catch (error) {
     next(error);
   }

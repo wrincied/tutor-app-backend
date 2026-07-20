@@ -80,6 +80,20 @@ function lessonDateIsoFromKey(occurrenceDate, scheduledAt) {
   return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
 }
 
+/** Полный ISO datetime для UI (home/agenda). Не обрезать до даты — иначе 00:00Z → 02:00 локально. */
+function lessonScheduledAtIso(occurrenceScheduledAt, fallbackScheduledAt) {
+  const raw = occurrenceScheduledAt || fallbackScheduledAt;
+  if (!raw) {
+    return null;
+  }
+  if (typeof raw === 'string' && raw.includes('T')) {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? raw : d.toISOString();
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 function expenseDate(expenseData) {
   const raw = expenseData.expense_date || expenseData.createdAt;
   if (!raw) {
@@ -424,8 +438,10 @@ router.get('/summary', async (req, res, next) => {
           lessonId: data._id,
           studentId: data.student_id ?? null,
           studentName: student?.name ? String(student.name) : null,
-          scheduledAt: lessonDateIsoFromKey(occurrence.occurrenceDate, occurrence.scheduledAt),
-          occurrenceDate: occurrence.occurrenceDate,
+          scheduledAt: lessonScheduledAtIso(occurrence.scheduledAt, data.scheduledAt),
+          occurrenceDate:
+            occurrence.occurrenceDate ||
+            lessonDateIsoFromKey(null, occurrence.scheduledAt || data.scheduledAt),
           status,
           durationMinutes: occurrence.durationMinutes,
           amountReport: earnedReport + plannedReport,

@@ -30,6 +30,7 @@ app.use('/api/billing', billingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/public', publicLegalRoutes);
+app.use('/api/bot', require('./src/routes/botWebhook'));
 app.use('/api/students', studentRoutes);
 app.use('/api/lessons', lessonRoutes);
 app.use('/api/finance', financeRoutes);
@@ -66,8 +67,11 @@ app.delete('/api/lessons-debug/:id', auth, async (req, res, next) => {
 
 app.use(errorHandler);
 
+const { startLessonBotNotifyWorker } = require('./src/workers/lessonBotNotify');
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT} (Firestore)`);
   console.log(`CORS origins: ${parseCorsOrigins().join(', ')}`);
+  startLessonBotNotifyWorker();
 });

@@ -20,13 +20,14 @@ const {
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
 const { normalizeRecurrenceFields, dayKeyFromDate, lessonWithEffectiveSchedule } = require('../utils/lessonRecurrence');
+const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates } = require('../services/lessonOccurrence');
+const { notifyLessonMoved } = require('../utils/telegramBot');
+const { resolveTutorName } = require('../utils/tutorName');
 const {
-  normalizeOccurrenceDate,
-  applyRecurringOccurrenceStatus,
-  excludeRecurringOccurrence,
-  occurrenceBalanceDebited,
-  uniqueDates,
-} = require('../services/lessonOccurrence');
+  formatLessonTimeLabel,
+  resolveTutorTimezone,
+  scheduleTimesEqual,
+} = require('../utils/lessonNotifyTime');
 
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
 
@@ -71,6 +72,29 @@ async function ensureStudentOwned(studentId, tutorId) {
     return null;
   }
   return studentData;
+}
+
+async function notifyLessonReschedule(tutorId, lesson, studentId) {
+  if (!studentId || !lesson?.scheduledAt) {
+    return;
+  }
+  const studentSnap = await db.collection('students').doc(String(studentId)).get();
+  if (!studentSnap.exists) {
+    return;
+  }
+  const student = studentSnap.data();
+  if (!student?.bot_active || !student?.telegram_user_id) {
+    return;
+  }
+  const tz = await resolveTutorTimezone(tutorId);
+  const tutorName = await resolveTutorName(tutorId);
+  const meetingLink = student.meeting_link || lesson.meeting_link || null;
+  await notifyLessonMoved({
+    studentId: String(studentId),
+    newTimeLabel: formatLessonTimeLabel(lesson.scheduledAt, tz),
+    meetingLink,
+    tutorName,
+  });
 }
 
 router.use(auth);
@@ -388,7 +412,18 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     const durationChanged = Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration');
     if (scheduleChanged || durationChanged) {
       patch.reminder_sent = false;
+      patch.post_lesson_notified = false;
     }
+
+    const nextScheduledAt = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt')
+      ? scheduledAt
+        ? String(scheduledAt)
+        : null
+      : existing.scheduledAt;
+    const timeActuallyMoved =
+      scheduleChanged &&
+      nextScheduledAt &&
+      !scheduleTimesEqual(existing.scheduledAt, nextScheduledAt);
 
     const nextStatus = patch.status ?? existing.status;
     const studentIdForBalance = patch.student_id ?? existing.student_id;
@@ -479,7 +514,16 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     await batch.commit();
 
     const updatedSnap = await lessonRef.get();
-    res.json(serializeDoc(updatedSnap));
+    const updated = serializeDoc(updatedSnap);
+
+    if (timeActuallyMoved && normalizeLessonStatus(nextStatus) === 'scheduled') {
+      const studentId = updated.student_id || studentIdForBalance;
+      notifyLessonReschedule(tutorId, updated, studentId).catch((err) => {
+        console.error('notifyLessonReschedule:', err.message);
+      });
+    }
+
+    res.json(updated);
   } catch (error) {
     next(error);
   }
