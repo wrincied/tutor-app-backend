@@ -121,6 +121,12 @@ async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorNa
   });
 }
 
+async function unlinkStudent({ studentId }) {
+  return botFetch('/v1/unlink', {
+    body: { student_id: studentId },
+  });
+}
+
 function withTelegramDeepLink(student) {
   if (!student || typeof student !== 'object') {
     return student;
@@ -138,6 +144,7 @@ module.exports = {
   newLinkToken,
   registerStudentLink,
   setBotActive,
+  unlinkStudent,
   notifyPayment,
   notifyBalance,
   notifyLessonStart,
