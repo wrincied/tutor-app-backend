@@ -19,6 +19,11 @@ const {
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
 
+/**
+ * Гарантирует документ users/{uid}. Пишет в Firestore только при создании
+ * или реальном изменении email / email_verified (не на каждый /me).
+ * @returns {{ userRef: FirebaseFirestore.DocumentReference, userSnap: FirebaseFirestore.DocumentSnapshot }}
+ */
 async function ensureTutorUserDoc(req) {
   const uid = req.user.id;
   const email = String(req.user.email || '').trim().toLowerCase();
@@ -46,21 +51,32 @@ async function ensureTutorUserDoc(req) {
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
-  } else {
-    await userRef.update({
-      email,
-      email_verified: req.user.email_verified,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    return { userRef, userSnap: await userRef.get() };
   }
 
-  return userRef;
+  const data = userSnap.data() || {};
+  const patch = {};
+  const currentEmail = String(data.email || '').trim().toLowerCase();
+  if (email && email !== currentEmail) {
+    patch.email = email;
+  }
+  if (Boolean(req.user.email_verified) !== Boolean(data.email_verified)) {
+    patch.email_verified = req.user.email_verified;
+  }
+
+  if (Object.keys(patch).length > 0) {
+    patch.updatedAt = FieldValue.serverTimestamp();
+    await userRef.update(patch);
+    return { userRef, userSnap: await userRef.get() };
+  }
+
+  return { userRef, userSnap };
 }
 
 /** Фиксирует визит пользователя (last_login_at). Вызывается с фронта при входе в /app. */
 router.post('/presence', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
+    const { userRef } = await ensureTutorUserDoc(req);
     const now = FieldValue.serverTimestamp();
     await userRef.update({
       last_login_at: now,
@@ -75,9 +91,8 @@ router.post('/presence', auth, async (req, res, next) => {
 /** Создаёт или обновляет профиль репетитора в Firestore (документ id = Firebase UID). */
 router.post('/bootstrap', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
-    const updatedSnap = await userRef.get();
-    const user = enrichUserProfile(serializeDoc(updatedSnap));
+    const { userSnap } = await ensureTutorUserDoc(req);
+    const user = enrichUserProfile(serializeDoc(userSnap));
     const { password_hash: _ph, ...safeUser } = user;
     safeUser.email_verified = req.user.email_verified;
     res.json(safeUser);
@@ -88,8 +103,7 @@ router.post('/bootstrap', auth, async (req, res, next) => {
 
 router.get('/me', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
-    const userSnap = await userRef.get();
+    const { userSnap } = await ensureTutorUserDoc(req);
     const user = enrichUserProfile(serializeDoc(userSnap));
     const { password_hash: _passwordHash, ...safeUser } = user;
     safeUser.email_verified = req.user.email_verified;
@@ -155,7 +169,7 @@ router.put('/me', auth, async (req, res, next) => {
 
 router.patch('/me/marketing-cookies', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
+    const { userRef } = await ensureTutorUserDoc(req);
     const accepted = req.body?.accepted;
     if (typeof accepted !== 'boolean') {
       return res.status(400).json({ message: 'accepted must be a boolean' });
@@ -180,7 +194,7 @@ router.patch('/me/marketing-cookies', auth, async (req, res, next) => {
 
 router.post('/onboarding', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
+    const { userRef } = await ensureTutorUserDoc(req);
 
     const {
       first_name,
@@ -231,7 +245,7 @@ router.post('/onboarding', auth, async (req, res, next) => {
 
 router.post('/onboarding/decline', auth, async (req, res, next) => {
   try {
-    const userRef = await ensureTutorUserDoc(req);
+    const { userRef } = await ensureTutorUserDoc(req);
 
     await userRef.update({
       data_consent_accepted: false,

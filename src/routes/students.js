@@ -16,6 +16,7 @@ const {
   newLinkToken,
   registerStudentLink,
   setBotActive,
+  unlinkStudent,
   notifyPayment,
   withTelegramDeepLink,
 } = require('../utils/telegramBot');
@@ -92,7 +93,8 @@ router.get('/', async (req, res, next) => {
       }
     }
     if (backfill.length) {
-      await Promise.all(backfill);
+      // Не блокируем ответ: цвета уже проставлены в payload.
+      Promise.all(backfill).catch(() => {});
     }
     students.sort((left, right) => {
       const l = left.createdAt ? Date.parse(left.createdAt) : 0;
@@ -370,6 +372,55 @@ router.delete('/:id', async (req, res, next) => {
       studentName: deleted.name ?? null,
     });
     res.json({ message: 'Deleted' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:id/telegram-disconnect', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    if (!before.telegram_user_id && !before.telegram_chat_id) {
+      return res.json(withTelegramDeepLink(serializeDoc(studentSnap)));
+    }
+
+    await studentRef.update({
+      bot_active: false,
+      telegram_user_id: null,
+      telegram_username: null,
+      telegram_display_name: null,
+      telegram_chat_id: null,
+      telegram_linked_at: null,
+      telegram_unlink_pending: false,
+      telegram_unlinked_username: null,
+      telegram_unlinked_at: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    // Best-effort: clear bot SQLite binding so notifies stop immediately.
+    void unlinkStudent({ studentId: req.params.id });
+
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.telegram_disconnected',
+      entityType: 'student',
+      entityId: req.params.id,
+      studentName: before.name,
+      metadata: {
+        telegram_user_id: before.telegram_user_id || null,
+        telegram_username: before.telegram_username || null,
+      },
+    });
+
+    const updated = withTelegramDeepLink(serializeDoc(await studentRef.get()));
+    res.json(updated);
   } catch (error) {
     next(error);
   }

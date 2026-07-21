@@ -16,6 +16,7 @@ const {
   getExchangeRates,
   normalizeCurrency,
   ratesForReport,
+  FALLBACK_EUR_RATES,
 } = require('../utils/currencyConvert');
 const { computeTaxProjection } = require('../utils/financeTax');
 const { normalizeTaxMode } = require('../utils/userProfile');
@@ -322,18 +323,36 @@ router.get('/summary', async (req, res, next) => {
     const tutorId = req.user.id;
     const from = parseDateQuery(req.query.from);
     const to = parseDateQuery(req.query.to);
+    /** Home: без расходов/налога — меньше чтений и работы на CPU. */
+    const homeScope = String(req.query.scope || '').toLowerCase() === 'home';
+
+    // Курсы стартуют параллельно с Firestore (кэш ~1ч — почти мгновенно).
+    const ratesPromise = getExchangeRates();
 
     const [lessonsSnap, expensesSnap, userSnap, studentsSnap] = await Promise.all([
       db.collection('lessons').where('tutor', '==', tutorId).get(),
-      db.collection('expenses').where('tutor', '==', tutorId).get(),
+      homeScope
+        ? Promise.resolve({ forEach() {}, empty: true, size: 0 })
+        : db.collection('expenses').where('tutor', '==', tutorId).get(),
       db.collection('users').doc(tutorId).get(),
       db.collection('students').where('tutor_id', '==', tutorId).get(),
     ]);
 
     const studentById = new Map();
+    const studentsHome = [];
     studentsSnap.forEach((doc) => {
       const row = serializeDoc(doc);
       studentById.set(row._id, row);
+      if (homeScope) {
+        studentsHome.push({
+          _id: row._id,
+          name: row.name ?? '',
+          color_hex: row.color_hex ?? null,
+          balance_lessons: Number(row.balance_lessons) || 0,
+          billing_type: row.billing_type ?? 'package',
+          rate_unit: row.rate_unit ?? 'hour',
+        });
+      }
     });
     const lessons = serializeQuerySnapshot(lessonsSnap).map((lesson) =>
       enrichLessonSnapshot(lesson, studentById),
@@ -347,7 +366,25 @@ router.get('/summary', async (req, res, next) => {
       req.query.currency && typeof req.query.currency === 'string'
         ? normalizeCurrency(req.query.currency)
         : defaultCurrency;
-    const { rates: eurRates, date: ratesDate, source: ratesSource } = await getExchangeRates();
+
+    const usedCurrencies = new Set([reportCurrency]);
+    for (const lesson of lessons) {
+      usedCurrencies.add(normalizeCurrency(lesson.lesson_currency));
+    }
+    if (!homeScope) {
+      expensesSnap.forEach((doc) => {
+        usedCurrencies.add(expenseStoredCurrency(doc.data(), defaultCurrency));
+      });
+    }
+    const needsFx = [...usedCurrencies].some((code) => code !== reportCurrency);
+
+    const { rates: eurRates, date: ratesDate, source: ratesSource } = needsFx
+      ? await ratesPromise
+      : {
+          rates: FALLBACK_EUR_RATES,
+          date: new Date().toISOString().slice(0, 10),
+          source: 'same-currency',
+        };
     const exchangeRatesMeta = {
       base: 'EUR',
       reportCurrency,
@@ -465,33 +502,35 @@ router.get('/summary', async (req, res, next) => {
     let totalExpenses = 0;
     let expenseCount = 0;
     const expensesBreakdown = [];
-    expensesSnap.forEach((doc) => {
-      const data = doc.data();
-      const expDate = expenseDate(data);
-      if (!inPeriod(expDate, from, to)) {
-        return;
-      }
-      expenseCount += 1;
-      const amount = Number(data.amount);
-      const raw = Number.isNaN(amount) ? 0 : amount;
-      const expenseCurrency = expenseStoredCurrency(data, defaultCurrency);
-      const amountReport = convertAmount(raw, expenseCurrency, reportCurrency, eurRates);
-      totalExpenses += amountReport;
-      const serialized = serializeDoc(doc);
-      expensesBreakdown.push({
-        id: serialized._id,
-        title: serialized.title,
-        amount: raw,
-        currency: expenseCurrency,
-        amountReport,
-        expense_date: serialized.expense_date,
-        category: serialized.category ?? '',
+    if (!homeScope) {
+      expensesSnap.forEach((doc) => {
+        const data = doc.data();
+        const expDate = expenseDate(data);
+        if (!inPeriod(expDate, from, to)) {
+          return;
+        }
+        expenseCount += 1;
+        const amount = Number(data.amount);
+        const raw = Number.isNaN(amount) ? 0 : amount;
+        const expenseCurrency = expenseStoredCurrency(data, defaultCurrency);
+        const amountReport = convertAmount(raw, expenseCurrency, reportCurrency, eurRates);
+        totalExpenses += amountReport;
+        const serialized = serializeDoc(doc);
+        expensesBreakdown.push({
+          id: serialized._id,
+          title: serialized.title,
+          amount: raw,
+          currency: expenseCurrency,
+          amountReport,
+          expense_date: serialized.expense_date,
+          category: serialized.category ?? '',
+        });
       });
-    });
 
-    expensesBreakdown.sort((left, right) =>
-      String(right.expense_date ?? '').localeCompare(String(left.expense_date ?? '')),
-    );
+      expensesBreakdown.sort((left, right) =>
+        String(right.expense_date ?? '').localeCompare(String(left.expense_date ?? '')),
+      );
+    }
 
     const combinedIncome = totalIncome + scheduledIncome;
     const combinedByCurrency = {};
@@ -505,18 +544,21 @@ router.get('/summary', async (req, res, next) => {
     }
 
     const grossProfit = totalIncome - totalExpenses;
-    const tax = computeTaxProjection(taxMode, { grossProfit, totalIncome });
-    const austria = taxMode === 'at-self-employed' && tax
-      ? {
-          socialInsuranceRate: tax.socialInsuranceRate,
-          socialInsurance: tax.socialInsurance,
-          taxableBase: tax.taxableBase,
-          incomeTax: tax.incomeTax,
-          netProfit: tax.netProfit,
-        }
-      : null;
+    const tax = homeScope
+      ? null
+      : computeTaxProjection(taxMode, { grossProfit, totalIncome });
+    const austria =
+      !homeScope && taxMode === 'at-self-employed' && tax
+        ? {
+            socialInsuranceRate: tax.socialInsuranceRate,
+            socialInsurance: tax.socialInsurance,
+            taxableBase: tax.taxableBase,
+            incomeTax: tax.incomeTax,
+            netProfit: tax.netProfit,
+          }
+        : null;
 
-    res.json({
+    const payload = {
       currency: reportCurrency,
       defaultCurrency,
       country,
@@ -551,7 +593,11 @@ router.get('/summary', async (req, res, next) => {
       austria,
       lessonsBreakdown,
       expensesBreakdown,
-    });
+    };
+    if (homeScope) {
+      payload.students = studentsHome;
+    }
+    res.json(payload);
   } catch (error) {
     next(error);
   }
