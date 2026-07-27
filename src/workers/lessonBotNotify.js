@@ -153,6 +153,7 @@ async function processAutoComplete(now = Date.now()) {
       balanceUnitsDebited: lesson.balance_units_debited,
       autoDebitEnabled: student.auto_debit_enabled !== false,
       manualCompletion: true,
+      studentBalance: student.balance_lessons,
     });
     await batch.commit();
     completed += 1;

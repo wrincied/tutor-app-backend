@@ -60,23 +60,33 @@ function debitPackageOccurrence(batch, {
   lessonId,
   occurrenceDate,
   amount = 1,
+  currentBalance,
 }) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
-  batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(-units),
-    updatedAt: FieldValue.serverTimestamp(),
-  });
+  const current = Number(currentBalance);
+  const hasCurrent = Number.isFinite(current);
+  const safeCurrent = hasCurrent ? current : 0;
+  const available = Math.max(0, safeCurrent);
+  const actualDebit = Math.round(Math.min(units, available) * 100) / 100;
+  const next = Math.round((safeCurrent - actualDebit) * 100) / 100;
+
+  if (actualDebit > 0) {
+    batch.update(studentRef, {
+      balance_lessons: next,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    appendBalanceLogEntry(batch, {
+      tutorId,
+      studentId,
+      studentName,
+      lessonId,
+      amount: -actualDebit,
+      reason: 'lesson_completed_occurrence',
+      occurrenceDate,
+    });
+  }
   batch.update(lessonRef, {
     updatedAt: FieldValue.serverTimestamp(),
-  });
-  appendBalanceLogEntry(batch, {
-    tutorId,
-    studentId,
-    studentName,
-    lessonId,
-    amount: -units,
-    reason: 'lesson_completed_occurrence',
-    occurrenceDate,
   });
 }
 
@@ -235,6 +245,7 @@ async function debitRecurringOccurrenceIfDue({
       lessonId,
       occurrenceDate,
       amount: units,
+      currentBalance: studentSnap?.data()?.balance_lessons,
     });
   } else {
     debitPostpaidOccurrence(batch, {
@@ -310,6 +321,7 @@ async function applyRecurringOccurrenceStatus({
           lessonId,
           occurrenceDate,
           amount: units,
+          currentBalance: studentSnap?.data()?.balance_lessons,
         });
       } else {
         debitPostpaidOccurrence(batch, {
@@ -351,6 +363,7 @@ async function applyRecurringOccurrenceStatus({
         lessonId,
         occurrenceDate,
         amount: units,
+        currentBalance: studentSnap?.data()?.balance_lessons,
       });
     } else {
       debitPostpaidOccurrence(batch, {
@@ -424,6 +437,7 @@ async function applyRecurringOccurrenceStatus({
         lessonId: lessonRef.id,
         occurrenceDate,
         amount: units,
+        currentBalance: studentSnap?.data()?.balance_lessons,
       });
     }
     await batch.commit();

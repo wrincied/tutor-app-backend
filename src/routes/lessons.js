@@ -227,6 +227,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
         shouldDeduct: shouldDeductOnCreate,
         autoDebitEnabled: studentData.auto_debit_enabled !== false,
         manualCompletion: req.body.manual_completion !== false,
+        studentBalance: studentData.balance_lessons,
       });
     } else {
       applyLessonBalanceOnCreate(batch, {
@@ -529,6 +530,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           shouldRefund,
           autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
           manualCompletion: req.body.manual_completion !== false,
+          studentBalance: studentSnap.data().balance_lessons,
         });
       }
     }

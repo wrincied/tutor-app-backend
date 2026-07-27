@@ -46,6 +46,7 @@ function resolveDebitAmount({ rateUnit, lessonDuration, amount }) {
 
 /**
  * Списание единиц абонемента (занятия или часы) в batch.
+ * Не уходит ниже 0: списывает min(amount, currentBalance).
  */
 function applyBalanceDebit(
   batch,
@@ -58,27 +59,48 @@ function applyBalanceDebit(
     lessonId,
     reason,
     amount = 1,
+    currentBalance,
   },
 ) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
-  batch.update(studentRef, {
-    balance_lessons: FieldValue.increment(-units),
-    updatedAt: FieldValue.serverTimestamp(),
-  });
+  const current = Number(currentBalance);
+  const hasCurrent = Number.isFinite(current);
+  // Нет снимка баланса — считаем 0, не уходим в минус через increment.
+  const safeCurrent = hasCurrent ? current : 0;
+  const available = Math.max(0, safeCurrent);
+  const actualDebit = Math.round(Math.min(units, available) * 100) / 100;
+  const next = Math.round((safeCurrent - actualDebit) * 100) / 100;
+
+  if (actualDebit > 0) {
+    batch.update(studentRef, {
+      balance_lessons: next,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    batch.update(lessonRef, {
+      balance_debited: true,
+      billing_processed: true,
+      balance_units_debited: actualDebit,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    appendBalanceLog(batch, {
+      tutorId,
+      studentId,
+      studentName,
+      lessonId,
+      amount: -actualDebit,
+      reason,
+    });
+    return { debited: true, amount: actualDebit };
+  }
+
+  // Баланс уже 0 — урок завершаем без ухода в минус.
   batch.update(lessonRef, {
-    balance_debited: true,
+    balance_debited: false,
     billing_processed: true,
-    balance_units_debited: units,
+    balance_units_debited: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
   });
-  appendBalanceLog(batch, {
-    tutorId,
-    studentId,
-    studentName,
-    lessonId,
-    amount: -units,
-    reason,
-  });
+  return { debited: false, amount: 0, clamped: true };
 }
 
 function applyBalanceRefund(
@@ -137,6 +159,7 @@ function applyLessonStatusBilling(batch, {
   shouldRefund,
   autoDebitEnabled,
   manualCompletion = false,
+  studentBalance,
 }) {
   if (!studentId || !studentRef || !lessonRef) {
     return {};
@@ -178,6 +201,7 @@ function applyLessonStatusBilling(batch, {
           lessonId,
           reason: 'lesson_completed',
           amount: debitAmount,
+          currentBalance: studentBalance,
         });
         return { debited: true, amount: debitAmount };
       }
@@ -221,6 +245,7 @@ function applyLessonStatusBilling(batch, {
           lessonId,
           reason: balanceLogReason(nextStatus, true, false),
           amount: debitAmount,
+          currentBalance: studentBalance,
         });
         return { debited: true, amount: debitAmount };
       }
@@ -389,6 +414,7 @@ async function cancelLessonWithBilling({
     balanceUnitsDebited: existing.balance_units_debited,
     shouldDeduct: Boolean(shouldDeduct),
     autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
+    studentBalance: studentSnap.data().balance_lessons,
   });
 
   await batch.commit();
