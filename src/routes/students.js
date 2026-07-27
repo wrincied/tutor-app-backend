@@ -7,6 +7,7 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
 const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt, parseBalanceAmount } = require('../utils/studentBilling');
+const { studentSnapshotFromStudent } = require('../utils/lessonSnapshot');
 const {
   collectPatchChanges,
   listActivityLogs,
@@ -486,6 +487,63 @@ router.post('/:id/topup', async (req, res, next) => {
       }).catch(() => {});
     }
     res.json(withTelegramDeepLink(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** POST /api/students/:id/resync-lesson-snapshots — переснять ставку на всех уроках ученика. */
+router.post('/:id/resync-lesson-snapshots', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    const studentData = studentSnap.data();
+    const snapshot = studentSnapshotFromStudent(studentData);
+    const lessonsSnap = await db.collection('lessons').where('tutor', '==', tutorId).get();
+    const docs = lessonsSnap.docs.filter((doc) => doc.data().student_id === req.params.id);
+
+    if (docs.length === 0) {
+      return res.json({ updated: 0 });
+    }
+
+    const chunkSize = 450;
+    let updated = 0;
+    for (let i = 0; i < docs.length; i += chunkSize) {
+      const batch = db.batch();
+      const chunk = docs.slice(i, i + chunkSize);
+      for (const doc of chunk) {
+        batch.update(doc.ref, {
+          ...snapshot,
+          student_name: studentData.name || doc.data().student_name || null,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      updated += chunk.length;
+    }
+
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.resync_lesson_snapshots',
+      entityType: 'student',
+      entityId: req.params.id,
+      studentName: studentData.name,
+      changes: [],
+      metadata: {
+        updated,
+        lesson_price: snapshot.lesson_price,
+        price_mode: snapshot.price_mode,
+        lesson_currency: snapshot.lesson_currency,
+      },
+    });
+
+    res.json({ updated });
   } catch (error) {
     next(error);
   }

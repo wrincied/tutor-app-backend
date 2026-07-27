@@ -3,6 +3,7 @@
 const {
   getSubscriptionPricing,
   normalizeCountryCode,
+  resolvePricingCountry,
   DEFAULT_COUNTRY,
 } = require('./subscriptionPricing');
 const { normalizeWorkspace, normalizeWorkingHours } = require('./userWorkspaceSettings');
@@ -62,6 +63,7 @@ function enrichUserProfile(user) {
   const tax_mode = normalizeTaxMode(user.tax_mode);
   const country_settings =
     normalizeCountryCode(user.country_settings) ?? DEFAULT_COUNTRY;
+  const pricingCountry = resolvePricingCountry(tax_mode, country_settings);
   const first_name = String(user.first_name ?? '').trim();
   const last_name = String(user.last_name ?? '').trim();
   const name =
@@ -89,7 +91,7 @@ function enrichUserProfile(user) {
     tax_mode,
     tax_mode_configured: isTaxModeConfigured(tax_mode),
     subscription_status: subscriptionLabel(user.subscription_status),
-    subscription_pricing: getSubscriptionPricing(country_settings),
+    subscription_pricing: getSubscriptionPricing(pricingCountry),
     role: normalizeRole(user.role),
     workspace: normalizeWorkspace(user.workspace),
     workingHours: normalizeWorkingHours(user.workingHours),

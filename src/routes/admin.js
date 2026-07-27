@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const requireSuperAdmin = require('../middleware/requireSuperAdmin');
-const { db, FieldValue } = require('../firebase');
+const { db, FieldValue, admin } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const { enrichUserProfile, subscriptionLabel } = require('../utils/userProfile');
 const { getSubscriptionPricing } = require('../utils/subscriptionPricing');
@@ -306,6 +306,46 @@ router.post('/users/:id/grant-trial', async (req, res, next) => {
       days: TRIAL_GIFT_DAYS,
       user: updated,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Подтверждает email в Firebase Auth (источник истины) и синхронизирует Firestore. */
+router.post('/users/:id/verify-email', async (req, res, next) => {
+  try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
+    const userId = req.params.id;
+    const userRef = db.collection('users').doc(userId);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    try {
+      await admin.auth().updateUser(userId, { emailVerified: true });
+    } catch (error) {
+      if (error?.code === 'auth/user-not-found') {
+        return res.status(404).json({
+          message: 'Firebase Auth user not found',
+          code: 'AUTH_USER_NOT_FOUND',
+        });
+      }
+      throw error;
+    }
+
+    await userRef.set(
+      {
+        email_verified: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    const updated = adminUserRow(await userRef.get());
+    res.json({ ok: true, user: updated });
   } catch (error) {
     next(error);
   }

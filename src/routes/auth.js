@@ -9,7 +9,7 @@ const {
   assertConfigurableTaxMode,
   normalizeTaxMode,
 } = require('../utils/userProfile');
-const { DEFAULT_COUNTRY, normalizeCountryCode } = require('../utils/subscriptionPricing');
+const { DEFAULT_COUNTRY, normalizeCountryCode, countryFromTaxMode } = require('../utils/subscriptionPricing');
 const {
   DEFAULT_WORKSPACE,
   DEFAULT_WORKING_HOURS,
@@ -144,6 +144,10 @@ router.put('/me', auth, async (req, res, next) => {
       if (check.mode !== currentTax) {
         patch.tax_mode = check.mode;
         patch.tax_mode_set_at = FieldValue.serverTimestamp();
+        const pricingCountry = countryFromTaxMode(check.mode);
+        if (pricingCountry) {
+          patch.country_settings = pricingCountry;
+        }
       }
     }
     if (timezone !== undefined) {
