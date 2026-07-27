@@ -103,7 +103,9 @@ async function writeActivityLog(payload) {
 
 async function listActivityLogs({ tutorId, category, limit = 50 }) {
   const capped = Math.min(Math.max(Number(limit) || 50, 1), 100);
-  const snap = await db.collection('activity_logs').where('tutor_id', '==', tutorId).limit(500).get();
+  // Берём небольшой запас под фильтр category в памяти (без composite index).
+  const fetchLimit = Math.min(500, Math.max(capped * 4, capped));
+  const snap = await db.collection('activity_logs').where('tutor_id', '==', tutorId).limit(fetchLimit).get();
   return serializeQuerySnapshot(snap)
     .filter((row) => row.category === category)
     .sort((left, right) => {
@@ -116,7 +118,7 @@ async function listActivityLogs({ tutorId, category, limit = 50 }) {
 
 async function listAllActivityLogs({ tutorId, limit = 100 }) {
   const capped = Math.min(Math.max(Number(limit) || 100, 1), 200);
-  const snap = await db.collection('activity_logs').where('tutor_id', '==', tutorId).limit(500).get();
+  const snap = await db.collection('activity_logs').where('tutor_id', '==', tutorId).limit(capped).get();
   return serializeQuerySnapshot(snap)
     .sort((left, right) => {
       const leftMs = left.createdAt ? Date.parse(left.createdAt) : 0;

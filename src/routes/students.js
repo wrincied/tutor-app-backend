@@ -288,7 +288,9 @@ router.put('/:id', async (req, res, next) => {
         rate_unit !== undefined
           ? normalizeRateUnit(rate_unit)
           : normalizeRateUnit(before.rate_unit);
-      patch.balance_lessons = parseBalanceAmount(balance_lessons, rateForBalance, 0);
+      patch.balance_lessons = parseBalanceAmount(balance_lessons, rateForBalance, 0, {
+        allowNegative: true,
+      });
     }
     if (credit_limit !== undefined) {
       patch.credit_limit = parseNonNegativeInt(credit_limit, 0);
