@@ -353,6 +353,22 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       }
     }
 
+    const refreshSnapshot = req.body.refresh_snapshot === true;
+    if (refreshSnapshot) {
+      const studentIdForSnapshot = patch.student_id ?? existing.student_id;
+      if (!studentIdForSnapshot) {
+        return res.status(400).json({ message: 'student_id is required to refresh snapshot' });
+      }
+      const studentData = await ensureStudentOwned(studentIdForSnapshot, tutorId);
+      if (!studentData) {
+        return res.status(400).json({ message: 'Student not found' });
+      }
+      Object.assign(patch, studentSnapshotFromStudent(studentData));
+      if (studentData.name) {
+        patch.student_name = studentData.name;
+      }
+    }
+
     if (
       Object.prototype.hasOwnProperty.call(req.body, 'lesson_price') ||
       Object.prototype.hasOwnProperty.call(req.body, 'lesson_currency') ||

@@ -32,6 +32,47 @@ function getSubscriptionPricing(country) {
   return PRICING_BY_COUNTRY[code] ?? PRICING_BY_COUNTRY[DEFAULT_COUNTRY];
 }
 
+const PRICING_TAX_MODES = new Set([
+  'at-self-employed',
+  'de-kleinunternehmer',
+  'pl-ryczalt',
+  'ru-usn',
+  'ru-ip',
+  'by-ip',
+  'kz-ip',
+  'ua-fop3',
+]);
+
+function normalizeTaxModeForPricing(raw) {
+  const value = String(raw ?? 'none').trim();
+  if (!value || value === 'none') {
+    return 'none';
+  }
+  if (value === 'austria-self-employed') {
+    return 'at-self-employed';
+  }
+  return value;
+}
+
+/** ISO country from tax_mode prefix (e.g. pl-ryczalt → PL). */
+function countryFromTaxMode(raw) {
+  const mode = normalizeTaxModeForPricing(raw);
+  if (!PRICING_TAX_MODES.has(mode)) {
+    return null;
+  }
+  const prefix = mode.split('-')[0]?.toUpperCase();
+  return prefix && prefix.length === 2 ? prefix : null;
+}
+
+/** Country for subscription pricing: tax regime overrides stored country_settings. */
+function resolvePricingCountry(taxMode, countrySettings) {
+  const fromTax = countryFromTaxMode(taxMode);
+  if (fromTax) {
+    return fromTax;
+  }
+  return normalizeCountryCode(countrySettings) ?? DEFAULT_COUNTRY;
+}
+
 function getStripePriceIdForCountry(country, interval = 'monthly') {
   const code = normalizeCountryCode(country) ?? DEFAULT_COUNTRY;
   const pricingCode = PRICING_BY_COUNTRY[code] ? code : DEFAULT_COUNTRY;
@@ -52,6 +93,8 @@ module.exports = {
   PRICING_COUNTRIES,
   DEFAULT_COUNTRY,
   normalizeCountryCode,
+  countryFromTaxMode,
+  resolvePricingCountry,
   getSubscriptionPricing,
   getStripePriceIdForCountry,
   PRICING_BY_COUNTRY,
