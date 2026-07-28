@@ -61,11 +61,34 @@ function debitPackageOccurrence(batch, {
   occurrenceDate,
   amount = 1,
   currentBalance,
+  allowNegative = false,
+  reason = 'lesson_completed_occurrence',
 }) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
   const current = Number(currentBalance);
   const hasCurrent = Number.isFinite(current);
   const safeCurrent = hasCurrent ? current : 0;
+
+  if (allowNegative) {
+    batch.update(studentRef, {
+      balance_lessons: FieldValue.increment(-units),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    appendBalanceLogEntry(batch, {
+      tutorId,
+      studentId,
+      studentName,
+      lessonId,
+      amount: -units,
+      reason,
+      occurrenceDate,
+    });
+    batch.update(lessonRef, {
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { debited: true, amount: units };
+  }
+
   const available = Math.max(0, safeCurrent);
   const actualDebit = Math.round(Math.min(units, available) * 100) / 100;
   const next = Math.round((safeCurrent - actualDebit) * 100) / 100;
@@ -81,13 +104,14 @@ function debitPackageOccurrence(batch, {
       studentName,
       lessonId,
       amount: -actualDebit,
-      reason: 'lesson_completed_occurrence',
+      reason,
       occurrenceDate,
     });
   }
   batch.update(lessonRef, {
     updatedAt: FieldValue.serverTimestamp(),
   });
+  return { debited: actualDebit > 0, amount: actualDebit };
 }
 
 function creditPackageOccurrence(batch, {
@@ -128,6 +152,7 @@ function debitPostpaidOccurrence(batch, {
   lessonId,
   occurrenceDate,
   amount = 1,
+  reason = 'lesson_completed_postpaid_occurrence',
 }) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
@@ -143,7 +168,7 @@ function debitPostpaidOccurrence(batch, {
     studentName,
     lessonId,
     amount: units,
-    reason: 'lesson_completed_postpaid_occurrence',
+    reason,
     occurrenceDate,
   });
 }
@@ -421,14 +446,27 @@ async function applyRecurringOccurrenceStatus({
     shouldDeduct === true &&
     !wasCompleted
   ) {
+    console.log('[billing] occurrence missed/canceled deduct', {
+      lessonId: lessonRef.id,
+      occurrenceDate,
+      normalizedStatus,
+      billingType,
+      units,
+      balanceBefore: studentSnap?.data()?.balance_lessons,
+      studentId,
+    });
     const nextExdates = uniqueDates([...exdates, occurrenceDate]);
     batch.update(lessonRef, {
       exdates: nextExdates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
+    const deductReason =
+      normalizedStatus === 'canceled'
+        ? 'lesson_canceled_deduct_occurrence'
+        : 'lesson_missed_deduct_occurrence';
     if (billingType === 'package') {
-      debitPackageOccurrence(batch, {
+      const debitResult = debitPackageOccurrence(batch, {
         tutorId,
         studentRef,
         lessonRef,
@@ -438,7 +476,24 @@ async function applyRecurringOccurrenceStatus({
         occurrenceDate,
         amount: units,
         currentBalance: studentSnap?.data()?.balance_lessons,
+        // Явный выбор «списать» — разрешаем уход в минус (долг).
+        allowNegative: true,
+        reason: deductReason,
       });
+      console.log('[billing] occurrence package debit result', debitResult);
+    } else {
+      debitPostpaidOccurrence(batch, {
+        tutorId,
+        studentRef,
+        lessonRef,
+        studentId,
+        studentName,
+        lessonId: lessonRef.id,
+        occurrenceDate,
+        amount: units,
+        reason: deductReason,
+      });
+      console.log('[billing] occurrence postpaid unpaid increment', { units });
     }
     await batch.commit();
     return { excluded: true, occurrenceDate, debited: true };

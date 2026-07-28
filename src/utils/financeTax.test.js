@@ -8,6 +8,7 @@ const {
   PL_RYCZALT_RATE,
   RU_USN_RATE,
   BY_IP_RATE,
+  BY_SELF_EMPLOYED_RATE,
   KZ_IP_RATE,
   UA_FOP3_RATE,
   DE_SOLIDARITY_SURCHARGE_RATE,
@@ -134,7 +135,7 @@ describe('computeTaxProjection', () => {
     assert.equal(tax.netProfit, 5000 - 5000 * RU_USN_RATE);
   });
 
-  it('computes BY IP 16% on profit', () => {
+  it('computes BY IP 20% on profit', () => {
     const tax = computeTaxProjection('by-ip', {
       grossProfit: 10000,
       totalIncome: 12000,
@@ -142,6 +143,19 @@ describe('computeTaxProjection', () => {
     assert.equal(tax.taxableBase, 10000);
     assert.equal(tax.incomeTax, 10000 * BY_IP_RATE);
     assert.equal(tax.netProfit, 10000 - 10000 * BY_IP_RATE);
+    assert.equal(BY_IP_RATE, 0.2);
+  });
+
+  it('computes BY self-employed 10% on profit', () => {
+    const tax = computeTaxProjection('by-self-employed', {
+      grossProfit: 10000,
+      totalIncome: 12000,
+    });
+    assert.equal(tax.mode, 'by-self-employed');
+    assert.equal(tax.taxableBase, 10000);
+    assert.equal(tax.incomeTax, 10000 * BY_SELF_EMPLOYED_RATE);
+    assert.equal(tax.netProfit, 10000 - 10000 * BY_SELF_EMPLOYED_RATE);
+    assert.equal(BY_SELF_EMPLOYED_RATE, 0.1);
   });
 
   it('computes KZ IP 3% on revenue', () => {

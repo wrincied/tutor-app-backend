@@ -39,6 +39,7 @@ const PRICING_TAX_MODES = new Set([
   'ru-usn',
   'ru-ip',
   'by-ip',
+  'by-self-employed',
   'kz-ip',
   'ua-fop3',
 ]);
