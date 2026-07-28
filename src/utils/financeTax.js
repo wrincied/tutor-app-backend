@@ -28,7 +28,10 @@ const DEFAULT_SOCIAL_INSURANCE_RATE = 0.1812;
 const DE_SOLIDARITY_SURCHARGE_RATE = 0.055;
 const PL_RYCZALT_RATE = 0.085;
 const RU_USN_RATE = 0.06;
-const BY_IP_RATE = 0.16;
+/** BY ИП — подоходный налог с прибыли (оценка 20%). */
+const BY_IP_RATE = 0.2;
+/** BY самозанятый — налог с прибыли (оценка 10%). */
+const BY_SELF_EMPLOYED_RATE = 0.1;
 const KZ_IP_RATE = 0.03;
 /** UA ФОП 3 група без ПДВ — типовая ставка 5% от доходу. */
 const UA_FOP3_RATE = 0.05;
@@ -159,6 +162,8 @@ function computeTaxProjection(taxMode, { grossProfit = 0, totalIncome = 0 } = {}
       return flatRevenueTax(mode, RU_USN_RATE, gross, income);
     case 'by-ip':
       return flatProfitTax(mode, BY_IP_RATE, gross);
+    case 'by-self-employed':
+      return flatProfitTax(mode, BY_SELF_EMPLOYED_RATE, gross);
     case 'kz-ip':
       return flatRevenueTax(mode, KZ_IP_RATE, gross, income);
     case 'ua-fop3':
@@ -176,6 +181,7 @@ module.exports = {
   PL_RYCZALT_RATE,
   RU_USN_RATE,
   BY_IP_RATE,
+  BY_SELF_EMPLOYED_RATE,
   KZ_IP_RATE,
   UA_FOP3_RATE,
   austrianIncomeTax,

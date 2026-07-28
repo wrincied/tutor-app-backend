@@ -300,19 +300,31 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         });
       }
       const manualCompletion = req.body.manual_completion !== false;
-      await applyRecurringOccurrenceStatus({
+      const occurrenceBilling = {
+        occurrenceDate,
+        nextStatus: occurrenceStatusRaw,
+        shouldDeduct: req.body.should_deduct_balance === true,
+        shouldRefund: req.body.should_refund_balance === true,
+        should_deduct_balance_raw: req.body.should_deduct_balance,
+      };
+      console.log('[billing] PUT occurrence status', {
+        lessonId: lessonRef.id,
+        ...occurrenceBilling,
+      });
+      const occurrenceResult = await applyRecurringOccurrenceStatus({
         tutorId,
         lessonRef,
         existing,
         occurrenceDate,
         nextStatus: occurrenceStatusRaw,
-        shouldDeduct: req.body.should_deduct_balance === true,
-        shouldRefund: req.body.should_refund_balance === true,
+        shouldDeduct: occurrenceBilling.shouldDeduct,
+        shouldRefund: occurrenceBilling.shouldRefund,
         autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
         studentSnap,
         studentRef,
         billImmediately: manualCompletion,
       });
+      console.log('[billing] PUT occurrence result', occurrenceResult);
     }
 
     const {
@@ -510,7 +522,19 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
             message: 'Auto debit is disabled for this student',
           });
         }
-        applyLessonStatusBilling(batch, {
+        console.log('[billing] PUT single lesson billing', {
+          lessonId: lessonRef.id,
+          previousStatus: existing.status,
+          nextStatus,
+          shouldDeduct,
+          shouldRefund,
+          should_deduct_balance_raw: req.body.should_deduct_balance,
+          balanceDebited: existing.balance_debited,
+          billingType: studentSnap.data().billing_type,
+          balanceBefore: studentSnap.data().balance_lessons,
+          statusChangingToMissedCanceled,
+        });
+        const billingResult = applyLessonStatusBilling(batch, {
           tutorId,
           studentId: studentIdForBalance,
           studentName: studentSnap.data().name,
@@ -532,6 +556,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           manualCompletion: req.body.manual_completion !== false,
           studentBalance: studentSnap.data().balance_lessons,
         });
+        console.log('[billing] PUT single lesson result', billingResult);
       }
     }
 

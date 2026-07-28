@@ -46,7 +46,7 @@ function resolveDebitAmount({ rateUnit, lessonDuration, amount }) {
 
 /**
  * Списание единиц абонемента (занятия или часы) в batch.
- * Не уходит ниже 0: списывает min(amount, currentBalance).
+ * По умолчанию не уходит ниже 0. При allowNegative (явный выбор репетитора) — можно в долг.
  */
 function applyBalanceDebit(
   batch,
@@ -60,13 +60,36 @@ function applyBalanceDebit(
     reason,
     amount = 1,
     currentBalance,
+    allowNegative = false,
   },
 ) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
   const current = Number(currentBalance);
   const hasCurrent = Number.isFinite(current);
-  // Нет снимка баланса — считаем 0, не уходим в минус через increment.
   const safeCurrent = hasCurrent ? current : 0;
+
+  if (allowNegative) {
+    batch.update(studentRef, {
+      balance_lessons: FieldValue.increment(-units),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    batch.update(lessonRef, {
+      balance_debited: true,
+      billing_processed: true,
+      balance_units_debited: units,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    appendBalanceLog(batch, {
+      tutorId,
+      studentId,
+      studentName,
+      lessonId,
+      amount: -units,
+      reason,
+    });
+    return { debited: true, amount: units };
+  }
+
   const available = Math.max(0, safeCurrent);
   const actualDebit = Math.round(Math.min(units, available) * 100) / 100;
   const next = Math.round((safeCurrent - actualDebit) * 100) / 100;
@@ -93,7 +116,7 @@ function applyBalanceDebit(
     return { debited: true, amount: actualDebit };
   }
 
-  // Баланс уже 0 — урок завершаем без ухода в минус.
+  // Баланс уже 0 — статус меняем без списания.
   batch.update(lessonRef, {
     balance_debited: false,
     billing_processed: true,
@@ -234,21 +257,58 @@ function applyLessonStatusBilling(batch, {
   }
 
   if (willBeMissedCanceled && !wasMissedCanceled) {
+    console.log('[billing] missed/canceled transition', {
+      lessonId,
+      studentId,
+      previousStatus,
+      nextStatus,
+      shouldDeduct,
+      alreadyDebited,
+      billingType,
+      debitAmount,
+      studentBalance,
+    });
     if (shouldDeduct === true) {
       if (!alreadyDebited) {
-        applyBalanceDebit(batch, {
+        if (billingType === 'package') {
+          const debitResult = applyBalanceDebit(batch, {
+            tutorId,
+            studentRef,
+            lessonRef,
+            studentId,
+            studentName,
+            lessonId,
+            reason: balanceLogReason(nextStatus, true, false),
+            amount: debitAmount,
+            currentBalance: studentBalance,
+            // Явный выбор «списать» — разрешаем уход в минус (долг).
+            allowNegative: true,
+          });
+          console.log('[billing] package debit result', debitResult);
+          return { debited: true, amount: debitAmount, ...debitResult };
+        }
+        batch.update(studentRef, {
+          unpaid_lessons_count: FieldValue.increment(debitAmount),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        batch.update(lessonRef, {
+          billing_processed: true,
+          balance_debited: true,
+          balance_units_debited: debitAmount,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        appendBalanceLog(batch, {
           tutorId,
-          studentRef,
-          lessonRef,
           studentId,
           studentName,
           lessonId,
-          reason: balanceLogReason(nextStatus, true, false),
           amount: debitAmount,
-          currentBalance: studentBalance,
+          reason: balanceLogReason(nextStatus, true, false),
         });
-        return { debited: true, amount: debitAmount };
+        console.log('[billing] postpaid unpaid increment', { debitAmount });
+        return { debited: true, amount: debitAmount, postpaid: true };
       }
+      console.log('[billing] skip: alreadyDebited');
       return { skipped: true, alreadyDebited: true };
     }
     if (shouldDeduct === false && alreadyDebited) {
@@ -264,6 +324,7 @@ function applyLessonStatusBilling(batch, {
       });
       return { refunded: true, amount: refundAmount };
     }
+    console.log('[billing] skip: shouldDeduct is not true', { shouldDeduct });
     return { skipped: true };
   }
 
