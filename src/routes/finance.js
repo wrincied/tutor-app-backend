@@ -59,6 +59,61 @@ function parseDateQuery(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * Home summary: не грузим всю историю уроков.
+ * Берём recurring-серии + one-off в окне дат (±1 день из‑за TZ).
+ * При отсутствии индекса — fallback на полный scan.
+ */
+async function fetchLessonsSnapForSummary(tutorId, { homeScope, from, to }) {
+  if (!homeScope || !from || !to) {
+    return db.collection('lessons').where('tutor', '==', tutorId).get();
+  }
+
+  try {
+    const rangeStart = new Date(from);
+    rangeStart.setUTCDate(rangeStart.getUTCDate() - 1);
+    const rangeEnd = new Date(to);
+    rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 2);
+    rangeEnd.setUTCHours(0, 0, 0, 0);
+
+    const fromIso = rangeStart.toISOString();
+    const toIso = rangeEnd.toISOString();
+
+    const [recurringSnap, rangedSnap] = await Promise.all([
+      db.collection('lessons').where('tutor', '==', tutorId).where('isRecurring', '==', true).get(),
+      db
+        .collection('lessons')
+        .where('tutor', '==', tutorId)
+        .where('scheduledAt', '>=', fromIso)
+        .where('scheduledAt', '<', toIso)
+        .get(),
+    ]);
+
+    const byId = new Map();
+    for (const doc of recurringSnap.docs) {
+      byId.set(doc.id, doc);
+    }
+    for (const doc of rangedSnap.docs) {
+      byId.set(doc.id, doc);
+    }
+
+    return {
+      docs: [...byId.values()],
+      empty: byId.size === 0,
+      size: byId.size,
+      forEach(cb) {
+        byId.forEach((doc) => cb(doc));
+      },
+    };
+  } catch (err) {
+    console.warn(
+      '[finance/summary] home narrow lessons query failed, fallback full scan:',
+      err?.message || err,
+    );
+    return db.collection('lessons').where('tutor', '==', tutorId).get();
+  }
+}
+
 function parseStoredDate(raw) {
   if (!raw) {
     return null;
@@ -327,16 +382,31 @@ router.get('/summary', async (req, res, next) => {
     const homeScope = String(req.query.scope || '').toLowerCase() === 'home';
 
     // Курсы стартуют параллельно с Firestore (кэш ~1ч — почти мгновенно).
-    const ratesPromise = getExchangeRates();
+    // Home: не ждём ЦБ — иначе summary упирается в timeout ~12s при недоступном банке.
+    const ratesPromise = homeScope ? null : getExchangeRates();
+    const lessonsStarted = Date.now();
+    console.log('[finance/summary] start', {
+      homeScope,
+      from: from ? from.toISOString().slice(0, 10) : null,
+      to: to ? to.toISOString().slice(0, 10) : null,
+      tutorId,
+    });
 
     const [lessonsSnap, expensesSnap, userSnap, studentsSnap] = await Promise.all([
-      db.collection('lessons').where('tutor', '==', tutorId).get(),
+      fetchLessonsSnapForSummary(tutorId, { homeScope, from, to }),
       homeScope
         ? Promise.resolve({ forEach() {}, empty: true, size: 0 })
         : db.collection('expenses').where('tutor', '==', tutorId).get(),
       db.collection('users').doc(tutorId).get(),
       db.collection('students').where('tutor_id', '==', tutorId).get(),
     ]);
+
+    if (homeScope) {
+      console.log('[finance/summary] home lessons loaded', {
+        count: lessonsSnap.size,
+        ms: Date.now() - lessonsStarted,
+      });
+    }
 
     const studentById = new Map();
     const studentsHome = [];
@@ -376,14 +446,14 @@ router.get('/summary', async (req, res, next) => {
         usedCurrencies.add(expenseStoredCurrency(doc.data(), defaultCurrency));
       });
     }
-    const needsFx = [...usedCurrencies].some((code) => code !== reportCurrency);
+    const needsFx = !homeScope && [...usedCurrencies].some((code) => code !== reportCurrency);
 
     const { rates: eurRates, date: ratesDate, source: ratesSource } = needsFx
       ? await ratesPromise
       : {
           rates: FALLBACK_EUR_RATES,
           date: new Date().toISOString().slice(0, 10),
-          source: 'same-currency',
+          source: homeScope ? 'home-fallback' : 'same-currency',
         };
     const exchangeRatesMeta = {
       base: 'EUR',
