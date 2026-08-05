@@ -2,6 +2,7 @@ const {
   sanitizeLegalMarkdown,
   sanitizeLegalTitle,
   isLegalDocId,
+  defaultLegalDoc,
 } = require('./legalContent');
 const { isSafeFirestoreId } = require('./safeId');
 const { describe, it } = require('node:test');
@@ -28,6 +29,32 @@ describe('legalContent sanitize', () => {
     assert.equal(isLegalDocId('impressum'), true);
     assert.equal(isLegalDocId('../etc'), false);
     assert.equal(isLegalDocId('cookies'), false);
+  });
+
+  it('default datenschutz covers WKO checklist headings', () => {
+    const doc = defaultLegalDoc('datenschutz');
+    assert.ok(doc);
+    assert.match(doc.title, /Datenschutz/i);
+    const body = doc.body;
+    for (const heading of [
+      'Verantwortlicher',
+      'Aufruf der Website',
+      'Nutzerkonto',
+      'CRM-Inhalte',
+      'Stripe',
+      'Telegram',
+      'Cookies',
+      'Empfänger',
+      'Drittländer',
+      'Speicherdauer',
+      'Ihre Rechte',
+      'Beschwerderecht',
+      'Automatisierte Entscheidungsfindung',
+    ]) {
+      assert.match(body, new RegExp(heading));
+    }
+    assert.match(body, /support@simple4u\.com/);
+    assert.match(body, /\[Firmenname\]/);
   });
 });
 
