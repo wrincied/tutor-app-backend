@@ -20,4 +20,10 @@ env:
     availability:
       - RUNTIME
 
-# Секреты (JWT, Stripe, Firebase SA) задайте в Firebase Console → App Hosting → Environment.
+  # GitHub Firebase UID(s) allowed for /api/admin (comma-separated).
+  - variable: ADMIN_GITHUB_UIDS
+    secret: ADMIN_GITHUB_UIDS
+    availability:
+      - RUNTIME
+
+# Остальные секреты (JWT, Stripe, Firebase SA) — в Firebase Console → App Hosting → Environment.

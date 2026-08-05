@@ -1,6 +1,6 @@
 /** Загрузка официальных курсов ЦБ → единиц валюты за 1 EUR. */
 
-const FETCH_TIMEOUT_MS = 12000;
+const FETCH_TIMEOUT_MS = 2500;
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);

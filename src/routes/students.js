@@ -22,6 +22,10 @@ const {
   withTelegramDeepLink,
 } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
+const {
+  normalizeTelegramSettings,
+  mapDeliveryError,
+} = require('../utils/telegramNotificationSettings');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB', 'KZT', 'UAH']);
 
@@ -253,6 +257,8 @@ router.put('/:id', async (req, res, next) => {
       bot_active,
       meeting_link,
       telegram_unlink_pending,
+      telegram_notification_settings,
+      is_minor,
     } = req.body;
     const patch = {
       updatedAt: FieldValue.serverTimestamp(),
@@ -320,6 +326,14 @@ router.put('/:id', async (req, res, next) => {
       if (!patch.telegram_unlink_pending) {
         patch.telegram_unlinked_username = null;
       }
+    }
+    if (telegram_notification_settings !== undefined) {
+      patch.telegram_notification_settings = normalizeTelegramSettings(
+        telegram_notification_settings,
+      );
+    }
+    if (is_minor !== undefined) {
+      patch.is_minor = Boolean(is_minor);
     }
 
     const nextBotActive =
@@ -403,6 +417,11 @@ router.post('/:id/telegram-disconnect', async (req, res, next) => {
       telegram_unlink_pending: false,
       telegram_unlinked_username: null,
       telegram_unlinked_at: FieldValue.serverTimestamp(),
+      telegram_delivery_status: null,
+      telegram_delivery_error: null,
+      telegram_parent_chat_id: null,
+      telegram_parent_username: null,
+      telegram_parent_linked_at: null,
       updatedAt: FieldValue.serverTimestamp(),
     });
 
@@ -449,8 +468,39 @@ router.post('/:id/topup', async (req, res, next) => {
       return res.status(400).json({ message: 'lessons must be a positive number' });
     }
 
+    const currency = ALLOWED_CURRENCY.has(before.rate_currency) ? before.rate_currency : 'EUR';
+    const rate = Number(before.rate_per_hour) || 0;
+    const moneyRaw = req.body.money_amount;
+    const moneyAmount =
+      moneyRaw !== undefined && moneyRaw !== null && moneyRaw !== ''
+        ? Number(moneyRaw)
+        : rate > 0
+          ? Math.round(rate * added * 100) / 100
+          : 0;
+    if (Number.isNaN(moneyAmount) || moneyAmount < 0) {
+      return res.status(400).json({ message: 'money_amount must be a non-negative number' });
+    }
+
+    let paidAt = new Date();
+    if (req.body.paid_at) {
+      const parsed = new Date(String(req.body.paid_at));
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({ message: 'paid_at must be a valid date' });
+      }
+      paidAt = parsed;
+    }
+
+    const last_topup = {
+      amount_money: moneyAmount,
+      currency,
+      units: added,
+      at: paidAt.toISOString(),
+    };
+
     await studentRef.update({
       balance_lessons: FieldValue.increment(added),
+      total_topup_units: FieldValue.increment(added),
+      last_topup,
       updatedAt: FieldValue.serverTimestamp(),
     });
     const updatedSnap = await studentRef.get();
@@ -469,26 +519,263 @@ router.post('/:id/topup', async (req, res, next) => {
           to: Number(updated.balance_lessons) || 0,
         },
       ],
-      metadata: { added, rate_unit: rateUnit },
+      metadata: {
+        added,
+        rate_unit: rateUnit,
+        money_amount: moneyAmount,
+        currency,
+        paid_at: last_topup.at,
+      },
     });
-    if (updated.bot_active) {
-      const currency = updated.rate_currency || '';
-      const rate = Number(updated.rate_per_hour) || 0;
+
+    let telegram_receipt_sent = false;
+    const settings = normalizeTelegramSettings(updated.telegram_notification_settings);
+    const wantsReceipt =
+      req.body.send_receipt !== undefined
+        ? Boolean(req.body.send_receipt)
+        : settings.payment_receipt_enabled;
+    const canNotify =
+      wantsReceipt &&
+      updated.bot_active &&
+      (updated.telegram_user_id || updated.telegram_chat_id) &&
+      updated.telegram_delivery_status !== 'error';
+
+    if (canNotify) {
       const unitLabel = rateUnit === 'lesson' ? 'ур.' : 'ч';
       const amountLabel =
-        rate > 0 && currency
-          ? `${(rate * added).toFixed(rate % 1 || added % 1 ? 2 : 0)} ${currency}`
-          : `+${added} ${unitLabel}`;
-      // Не блокируем ответ CRM, если бот недоступен.
-      notifyPayment({
-        studentId: updated._id,
-        amountLabel,
-        lessonsAdded: added,
-        rateUnit,
-        tutorName: await resolveTutorName(tutorId),
-      }).catch(() => {});
+        moneyAmount > 0 && currency
+          ? `${moneyAmount} ${currency}`
+          : rate > 0 && currency
+            ? `${(rate * added).toFixed(rate % 1 || added % 1 ? 2 : 0)} ${currency}`
+            : `+${added} ${unitLabel}`;
+      try {
+        const notifyResult = await notifyPayment({
+          studentId: updated._id,
+          amountLabel,
+          lessonsAdded: added,
+          rateUnit,
+          tutorName: await resolveTutorName(tutorId),
+        });
+        if (notifyResult?.ok) {
+          telegram_receipt_sent = true;
+          if (updated.telegram_delivery_status === 'error') {
+            await studentRef.update({
+              telegram_delivery_status: 'ok',
+              telegram_delivery_error: null,
+              updatedAt: FieldValue.serverTimestamp(),
+            });
+          }
+        } else if (!notifyResult?.skipped) {
+          const code = mapDeliveryError(notifyResult);
+          await studentRef.update({
+            telegram_delivery_status: 'error',
+            telegram_delivery_error: code,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          updated.telegram_delivery_status = 'error';
+          updated.telegram_delivery_error = code;
+        }
+      } catch {
+        // Не блокируем ответ CRM.
+      }
     }
-    res.json(withTelegramDeepLink(updated));
+
+    res.json({
+      ...withTelegramDeepLink(updated),
+      telegram_receipt_sent,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const BALANCE_ADJUST_REASONS = new Set(['no_show', 'bonus', 'typo']);
+
+router.post('/:id/balance-adjust', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const reason = String(req.body.reason || '');
+    if (!BALANCE_ADJUST_REASONS.has(reason)) {
+      return res.status(400).json({ message: 'reason must be no_show, bonus, or typo' });
+    }
+
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    const rateUnit = normalizeRateUnit(before.rate_unit);
+    const nextBalance = parseBalanceAmount(req.body.balance_lessons, rateUnit, 0, {
+      allowNegative: true,
+    });
+    if (Number.isNaN(Number(req.body.balance_lessons))) {
+      return res.status(400).json({ message: 'balance_lessons must be a number' });
+    }
+
+    const from = Number(before.balance_lessons) || 0;
+    await studentRef.update({
+      balance_lessons: nextBalance,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    const updated = serializeDoc(await studentRef.get());
+
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.balance_adjust',
+      entityType: 'student',
+      entityId: updated._id,
+      studentName: updated.name,
+      changes: [
+        {
+          field: 'balance_lessons',
+          from,
+          to: Number(updated.balance_lessons) || 0,
+        },
+      ],
+      metadata: { reason, rate_unit: rateUnit, notify_telegram: Boolean(req.body.notify_telegram) },
+    });
+
+    let telegram_notified = false;
+    const wantsNotify = Boolean(req.body.notify_telegram);
+    const canNotify =
+      wantsNotify &&
+      updated.bot_active &&
+      (updated.telegram_user_id || updated.telegram_chat_id) &&
+      updated.telegram_delivery_status !== 'error';
+
+    if (canNotify) {
+      try {
+        const unitLabel = rateUnit === 'lesson' ? 'ур.' : 'ч';
+        const amountLabel = `${from} → ${nextBalance} ${unitLabel}`;
+        const notifyResult = await notifyPayment({
+          studentId: updated._id,
+          amountLabel,
+          lessonsAdded: nextBalance - from,
+          rateUnit,
+          tutorName: await resolveTutorName(tutorId),
+        });
+        if (notifyResult?.ok) {
+          telegram_notified = true;
+        } else if (!notifyResult?.skipped) {
+          const code = mapDeliveryError(notifyResult);
+          await studentRef.update({
+            telegram_delivery_status: 'error',
+            telegram_delivery_error: code,
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          updated.telegram_delivery_status = 'error';
+          updated.telegram_delivery_error = code;
+        }
+      } catch {
+        // CRM response not blocked.
+      }
+    }
+
+    res.json({
+      ...withTelegramDeepLink(updated),
+      telegram_notified,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/:id/telegram-settings', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const settings = normalizeTelegramSettings(req.body);
+    await studentRef.update({
+      telegram_notification_settings: settings,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    res.json(withTelegramDeepLink(serializeDoc(await studentRef.get())));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** True if chatId is already bound on another student (any of the TG id fields). */
+async function findConflictingTelegramChat(chatId, excludeStudentId) {
+  const fields = ['telegram_chat_id', 'telegram_user_id', 'telegram_parent_chat_id'];
+  const seen = new Set();
+  for (const field of fields) {
+    const snap = await db.collection('students').where(field, '==', chatId).limit(5).get();
+    for (const doc of snap.docs) {
+      if (doc.id === excludeStudentId || seen.has(doc.id)) {
+        continue;
+      }
+      seen.add(doc.id);
+      return doc;
+    }
+  }
+  return null;
+}
+
+router.post('/:id/telegram-link-manual', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const chatId = String(req.body.chat_id || '').trim();
+    const role = req.body.role === 'parent' ? 'parent' : 'student';
+    if (!/^-?\d{5,20}$/.test(chatId)) {
+      return res.status(400).json({ message: 'chat_id must be a numeric Telegram chat id' });
+    }
+    if (req.body.confirm_recipient_consent !== true) {
+      return res.status(400).json({
+        message: 'confirm_recipient_consent is required — recipient must agree to receive bot messages',
+      });
+    }
+
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    const conflict = await findConflictingTelegramChat(chatId, req.params.id);
+    if (conflict) {
+      return res.status(409).json({
+        message: 'This Telegram chat is already linked to another student',
+      });
+    }
+
+    const patch = {
+      telegram_delivery_status: 'ok',
+      telegram_delivery_error: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (role === 'parent') {
+      patch.telegram_parent_chat_id = chatId;
+      patch.telegram_parent_linked_at = FieldValue.serverTimestamp();
+      patch.is_minor = true;
+    } else {
+      patch.telegram_chat_id = chatId;
+      patch.telegram_user_id = chatId;
+      patch.telegram_linked_at = FieldValue.serverTimestamp();
+      patch.bot_active = true;
+    }
+
+    await studentRef.update(patch);
+    if (role === 'student') {
+      const before = studentSnap.data();
+      const { telegram_link_token } = await ensureTelegramLink(req.params.id, {
+        name: before.name,
+        botActive: true,
+        existingToken: before.telegram_link_token || null,
+        tutorId,
+      });
+      if (telegram_link_token) {
+        await studentRef.update({ telegram_link_token });
+      }
+    }
+
+    res.json(withTelegramDeepLink(serializeDoc(await studentRef.get())));
   } catch (error) {
     next(error);
   }
