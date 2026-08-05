@@ -4,7 +4,7 @@ const LEGAL_DOC_IDS = Object.freeze(['datenschutz', 'impressum']);
 /**
  * Default Datenschutzerklärung (DE) aligned with WKO checklist
  * (DSGVO Art. 13/14 + TKG Informationspflichten).
- * Placeholders [Firmenname], [Anschrift], [Telefon] must be filled in Impressum/CMS.
+ * Operator: Arsen Mileuski (Einzelunternehmen / Gewerbe in Anmeldung).
  */
 const DATENSCHUTZ_BODY = [
   '# Datenschutzerklärung',
@@ -19,9 +19,9 @@ const DATENSCHUTZ_BODY = [
   '',
   'Verantwortlich für die Datenverarbeitung:',
   '',
-  '- **[Firmenname]** (Betreiber von Simple4U)',
+  '- **Arsen Mileuski** (Betreiber von Simple4U)',
   '- Anschrift: **Köflacher Gasse 9, 2.218, 8020 Graz, Österreich**',
-  '- Telefon: **+4366493290516**',
+  '- Telefon: **+43 664 93290516**',
   '- E-Mail: **support@simple4u.com**',
   '',
   'Weitere Angaben finden Sie im [Impressum](/#/legal/impressum).',
@@ -170,16 +170,28 @@ const DEFAULT_LEGAL = Object.freeze({
     body: [
       '# Impressum',
       '',
-      '## Angaben gemäß § 5 ECG / Mediengesetz (AT) bzw. einschlägiger Kennzeichnungspflichten',
+      '## Medieninhaber / Diensteanbieter',
       '',
-      '**[Firmenname]**',
-      'Anschrift: **[Anschrift]**',
-      'Telefon: **[Telefon]**',
+      '**Arsen Mileuski**',
+      'Köflacher Gasse 9, 2.218',
+      '8020 Graz, Österreich',
       '',
       '## Kontakt',
+      '',
+      'Telefon: +43 664 93290516',
       'E-Mail: support@simple4u.com',
       '',
+      '## Gewerbe',
+      '',
+      'Einzelunternehmen — Gewerbeanmeldung eingereicht (GISA in Bearbeitung).',
+      '',
+      '## Offenlegung nach § 25 MedienG',
+      '',
+      'Medieninhaber: Arsen Mileuski',
+      'Unternehmensgegenstand: Bereitstellung der Web-Anwendung Simple4U (Tutor-CRM).',
+      '',
       '## Haftung für Inhalte',
+      '',
       'Die Inhalte dieser Seiten wurden mit Sorgfalt erstellt. Für die Richtigkeit, Vollständigkeit und Aktualität übernehmen wir keine Gewähr.',
     ].join('\n'),
   },
