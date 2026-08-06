@@ -4,7 +4,7 @@ const LEGAL_DOC_IDS = Object.freeze(['datenschutz', 'impressum']);
 /**
  * Default Datenschutzerklärung (DE) aligned with WKO checklist
  * (DSGVO Art. 13/14 + TKG Informationspflichten).
- * Operator: Arsen Mileuski (Einzelunternehmen / Gewerbe in Anmeldung).
+ * Operator: Arsen Mileuski (Einzelunternehmen, GISA 39994318).
  */
 const DATENSCHUTZ_BODY = [
   '# Datenschutzerklärung',
@@ -183,7 +183,12 @@ const DEFAULT_LEGAL = Object.freeze({
       '',
       '## Gewerbe',
       '',
-      'Einzelunternehmen — Gewerbeanmeldung eingereicht (GISA in Bearbeitung).',
+      'Rechtsform: Einzelunternehmen (natürliche Person, nicht im Firmenbuch eingetragen)',
+      'Gewerbebehörde: Magistrat der Stadt Graz',
+      'GISA-Zahl: 39994318',
+      '',
+      'Mitglied der Wirtschaftskammer Österreich (WKO)',
+      'Anwendbare Vorschriften: Gewerbeordnung (GewO) — abrufbar unter https://www.ris.bka.gv.at',
       '',
       '## Offenlegung nach § 25 MedienG',
       '',
