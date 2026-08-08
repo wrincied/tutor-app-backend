@@ -1,5 +1,5 @@
 const { subscriptionLabel } = require('./userProfile');
-const { getSubscriptionPricing } = require('./subscriptionPricing');
+const { getPlanPricing, getSubscriptionPricing, resolvePricingCountry } = require('./subscriptionPricing');
 const { serializeDoc, serializeQuerySnapshot } = require('./serialize');
 
 const MS_DAY = 24 * 60 * 60 * 1000;
@@ -25,6 +25,8 @@ function trialEndsMs(raw) {
 function buildStats(userDocs) {
   let totalUsers = 0;
   let paidUsers = 0;
+  let basisUsers = 0;
+  let proUsers = 0;
   let trialUsers = 0;
   const estimatedMrr = {};
 
@@ -32,10 +34,25 @@ function buildStats(userDocs) {
     totalUsers += 1;
     const data = doc.data();
     const status = subscriptionLabel(data.subscription_status);
-    if (status === 'pro') {
+    if (status === 'basis' || status === 'pro') {
       paidUsers += 1;
-      const pricing = getSubscriptionPricing(data.country_settings);
-      estimatedMrr[pricing.currency] = (estimatedMrr[pricing.currency] || 0) + pricing.monthly;
+      if (status === 'basis') {
+        basisUsers += 1;
+      } else {
+        proUsers += 1;
+      }
+      try {
+        const pricingCountry = resolvePricingCountry(data.tax_mode, data.country_settings);
+        const pricing =
+          status === 'basis'
+            ? getPlanPricing('basis', pricingCountry)
+            : getSubscriptionPricing(data.country_settings);
+        const currency = pricing?.currency || 'EUR';
+        const monthly = Number(pricing?.monthly) || 0;
+        estimatedMrr[currency] = (estimatedMrr[currency] || 0) + monthly;
+      } catch (err) {
+        console.warn('[adminDashboard] MRR skip', doc.id, err?.message || err);
+      }
     } else if (status === 'trial') {
       trialUsers += 1;
     }
@@ -44,7 +61,15 @@ function buildStats(userDocs) {
   const conversionPercent =
     totalUsers > 0 ? Math.round((paidUsers / totalUsers) * 1000) / 10 : 0;
 
-  return { totalUsers, paidUsers, trialUsers, conversionPercent, estimatedMrr };
+  return {
+    totalUsers,
+    paidUsers,
+    basisUsers,
+    proUsers,
+    trialUsers,
+    conversionPercent,
+    estimatedMrr,
+  };
 }
 
 function buildSegments(userDocs, nowMs) {
@@ -295,6 +320,8 @@ async function buildAdminDashboard(db, { activityLimit = 40 } = {}) {
 
 const DEFAULT_DASHBOARD_WIDGETS = [
   'kpi-total-users',
+  'kpi-basis-users',
+  'kpi-pro-users',
   'kpi-paid-users',
   'kpi-trial-users',
   'kpi-conversion',

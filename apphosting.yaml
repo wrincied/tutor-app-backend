@@ -16,7 +16,11 @@ env:
       https://simple4u-64822.firebaseapp.com,
       https://tutorassis.web.app,
       https://tutorassis.firebaseapp.com,
-      https://wrincied.github.io
+      https://wrincied.github.io,
+      https://simple4u.at,
+      http://localhost:4200,
+      http://localhost:4300,
+      http://localhost:4400
     availability:
       - RUNTIME
 

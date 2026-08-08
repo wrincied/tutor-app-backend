@@ -78,6 +78,14 @@ async function notifyLessonReschedule(tutorId, lesson, studentId) {
   if (!studentId || !lesson?.scheduledAt) {
     return;
   }
+  const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
+  const tutorSnap = await db.collection('users').doc(String(tutorId)).get();
+  const tutorStatus = subscriptionLabel(
+    tutorSnap.exists ? tutorSnap.data()?.subscription_status : 'free',
+  );
+  if (!hasTelegramAccess(tutorStatus)) {
+    return;
+  }
   const studentSnap = await db.collection('students').doc(String(studentId)).get();
   if (!studentSnap.exists) {
     return;

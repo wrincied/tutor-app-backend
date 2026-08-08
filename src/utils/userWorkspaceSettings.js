@@ -1,5 +1,5 @@
 const WORKSPACE_CURRENCIES = new Set(['EUR', 'USD', 'RUB', 'BYN']);
-const WORKSPACE_DURATIONS = new Set([45, 60, 90]);
+const WORKSPACE_DURATIONS = new Set([45, 60, 90, 120]);
 const DEFAULT_WORKSPACE = {
   name: '',
   currency: 'EUR',
@@ -9,6 +9,12 @@ const DEFAULT_WORKING_HOURS = {
   start: '08:00',
   end: '21:00',
   days: [1, 2, 3, 4, 5],
+};
+const DEFAULT_VACATION = {
+  enabled: false,
+  startDate: '',
+  endDate: '',
+  message: '',
 };
 
 function parseHourToken(value) {
@@ -64,9 +70,42 @@ function normalizeWorkingHours(raw) {
   };
 }
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function normalizeDateToken(value) {
+  const raw = String(value ?? '').trim();
+  if (!DATE_RE.test(raw)) {
+    return '';
+  }
+  const time = Date.parse(`${raw}T12:00:00`);
+  return Number.isFinite(time) ? raw : '';
+}
+
+function normalizeVacation(raw) {
+  const data = raw && typeof raw === 'object' ? raw : {};
+  let startDate = normalizeDateToken(data.startDate);
+  let endDate = normalizeDateToken(data.endDate);
+  if (startDate && endDate && endDate < startDate) {
+    const swap = startDate;
+    startDate = endDate;
+    endDate = swap;
+  }
+  return {
+    enabled: data.enabled === true,
+    startDate,
+    endDate,
+    message: String(data.message ?? '')
+      .replace(/\r\n/g, '\n')
+      .trim()
+      .slice(0, 500),
+  };
+}
+
 module.exports = {
   DEFAULT_WORKSPACE,
   DEFAULT_WORKING_HOURS,
+  DEFAULT_VACATION,
   normalizeWorkspace,
   normalizeWorkingHours,
+  normalizeVacation,
 };

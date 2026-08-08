@@ -269,10 +269,30 @@ cp .env.example .env
 | `FIREBASE_STORAGE_BUCKET` | Storage bucket |
 | `FIREBASE_SERVICE_ACCOUNT` | JSON service account (single line) |
 | `FRONTEND_URL` | Comma-separated CORS origins |
-| `STRIPE_SECRET_KEY` | Stripe secret (billing) |
-| `STRIPE_PRICE_ID_PRO` | Pro price id |
-| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret |
-| `SMTP_*` / `EMAIL_FROM` | Outbound email (optional locally) |
+| `STRIPE_SECRET_KEY` | Stripe secret (`sk_test_…` locally, `sk_live_…` in prod) |
+| `STRIPE_PRICE_ID_PRO` | Default Pro monthly price id |
+| `STRIPE_PRICE_ID_PRO_YEARLY` | Pro yearly price id |
+| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret (`whsec_…`) |
+
+### Stripe Test Mode (local sandbox)
+
+1. Open [Stripe Dashboard → Test mode → API keys](https://dashboard.stripe.com/test/apikeys) and copy **Secret key** (`sk_test_…`).
+2. Put it in `backend/.env`:
+   ```bash
+   STRIPE_SECRET_KEY=sk_test_...
+   ```
+3. Create Product + Prices and write them into `.env`:
+   ```bash
+   node scripts/setup-stripe-sandbox.js --write
+   ```
+4. Restart the API. Optional local webhooks:
+   ```bash
+   stripe listen --forward-to localhost:3001/api/billing/webhook
+   ```
+   Paste the printed `whsec_…` into `STRIPE_WEBHOOK_SECRET`.
+5. Pay in Checkout with test card `4242 4242 4242 4242` (any future expiry, any CVC).
+
+Verify: `GET http://localhost:3001/api/health` → `services.stripe.status` should be `"ok"`.
 
 ### 3. Run
 
