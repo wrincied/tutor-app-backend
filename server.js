@@ -39,7 +39,66 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'tutor-backend' });
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', db: 'firestore' }));
+/**
+ * Aggregated public health for status page.
+ * Checks process (always ok if responding), Firestore reachability, Stripe API.
+ */
+app.get('/api/health', async (req, res) => {
+  const checkedAt = new Date().toISOString();
+  const services = {
+    app: { status: 'ok' },
+    database: { status: 'error', provider: 'firestore' },
+    stripe: { status: 'unconfigured' },
+  };
+
+  try {
+    await db.collection('lessons').limit(1).get();
+    services.database = { status: 'ok', provider: 'firestore' };
+  } catch (err) {
+    console.error('Health database:', err.message);
+    services.database = {
+      status: 'error',
+      provider: 'firestore',
+      detail: err.message,
+    };
+  }
+
+  const stripeKey = String(process.env.STRIPE_SECRET_KEY || '').trim();
+  if (!stripeKey || stripeKey === 'your_stripe_secret_key' || !stripeKey.startsWith('sk_')) {
+    services.stripe = { status: 'unconfigured' };
+  } else {
+    try {
+      // eslint-disable-next-line global-require
+      const stripe = require('stripe')(stripeKey);
+      await Promise.race([
+        stripe.balance.retrieve(),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Stripe health timeout')), 5000);
+        }),
+      ]);
+      services.stripe = {
+        status: 'ok',
+        mode: stripeKey.startsWith('sk_test_') ? 'test' : 'live',
+      };
+    } catch (err) {
+      console.error('Health stripe:', err.message);
+      services.stripe = { status: 'error', detail: err.message };
+    }
+  }
+
+  const states = Object.values(services).map((s) => s.status);
+  let status = 'ok';
+  if (states.every((s) => s === 'ok')) {
+    status = 'ok';
+  } else if (services.database.status === 'error' && services.stripe.status === 'error') {
+    status = 'error';
+  } else {
+    status = 'degraded';
+  }
+
+  const httpStatus = status === 'error' ? 503 : 200;
+  res.status(httpStatus).json({ status, checkedAt, services });
+});
 
 app.get('/api/health/firestore', async (req, res) => {
   try {

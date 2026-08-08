@@ -13,6 +13,8 @@
     "verify-email": "node scripts/verify-email.js",
     "confirm-subscription": "node scripts/confirm-subscription.js",
     "finance:playground": "node scripts/finance-playground.js",
+    "stripe:sandbox": "node scripts/setup-stripe-sandbox.js",
+    "stripe:sandbox:write": "node scripts/setup-stripe-sandbox.js --write",
     "test": "node --test src/**/*.test.js"
   },
   "keywords": [],

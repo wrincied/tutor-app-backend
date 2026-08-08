@@ -12,11 +12,31 @@ const {
   formatLessonTimeLabel,
   resolveTutorTimezone,
 } = require('../utils/lessonNotifyTime');
+const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
 
 const REMIND_MINUTES = 30;
 const COMPLETE_BUFFER_MS = 30 * 60 * 1000;
 const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки «за 30 мин»
 const TICK_MS = 60 * 1000;
+
+/** tutorId → subscription status (refreshed per tick). */
+const tutorPlanCache = new Map();
+
+async function tutorHasTelegram(tutorId) {
+  const id = String(tutorId || '');
+  if (!id) {
+    return false;
+  }
+  if (tutorPlanCache.has(id)) {
+    return tutorPlanCache.get(id);
+  }
+  const snap = await db.collection('users').doc(id).get();
+  const allowed = hasTelegramAccess(
+    subscriptionLabel(snap.exists ? snap.data()?.subscription_status : 'free'),
+  );
+  tutorPlanCache.set(id, allowed);
+  return allowed;
+}
 
 function lessonEndMs(lesson) {
   const start = Date.parse(lesson.scheduledAt);
@@ -42,6 +62,13 @@ function canNotifyStudent(student) {
   return Boolean(student?.bot_active && student?.telegram_user_id);
 }
 
+async function canNotifyTutorStudent(tutorId, student) {
+  if (!canNotifyStudent(student)) {
+    return false;
+  }
+  return tutorHasTelegram(tutorId);
+}
+
 /**
  * Напоминание за 30 минут до старта (по абсолютному времени урока;
  * подпись времени — в timezone репетитора).
@@ -65,7 +92,7 @@ async function processReminders(now = Date.now()) {
     }
 
     const student = await loadStudent(lesson.student_id);
-    if (!canNotifyStudent(student)) {
+    if (!(await canNotifyTutorStudent(lesson.tutor, student))) {
       await doc.ref.update({
         reminder_sent: true,
         updatedAt: FieldValue.serverTimestamp(),
@@ -158,7 +185,7 @@ async function processAutoComplete(now = Date.now()) {
     await batch.commit();
     completed += 1;
 
-    if (!canNotifyStudent(student)) {
+    if (!(await canNotifyTutorStudent(tutorId, student))) {
       await lessonRef.update({
         post_lesson_notified: true,
         updatedAt: FieldValue.serverTimestamp(),
@@ -194,6 +221,7 @@ async function processAutoComplete(now = Date.now()) {
 
 async function tick() {
   try {
+    tutorPlanCache.clear();
     const reminded = await processReminders();
     const done = await processAutoComplete();
     if (reminded || done) {

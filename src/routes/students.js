@@ -26,8 +26,21 @@ const {
   normalizeTelegramSettings,
   mapDeliveryError,
 } = require('../utils/telegramNotificationSettings');
+const {
+  maxStudentsForPlan,
+  hasTelegramAccess,
+  subscriptionLabel,
+} = require('../utils/userProfile');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB', 'KZT', 'UAH']);
+
+async function loadTutorSubscriptionStatus(tutorId) {
+  const snap = await db.collection('users').doc(String(tutorId)).get();
+  if (!snap.exists) {
+    return 'free';
+  }
+  return subscriptionLabel(snap.data()?.subscription_status);
+}
 
 function normalizeMeetingLink(value) {
   if (value === undefined) {
@@ -147,6 +160,19 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ message: 'name is required' });
     }
 
+    const planStatus = await loadTutorSubscriptionStatus(tutorId);
+    const maxStudents = maxStudentsForPlan(planStatus);
+    if (maxStudents !== null) {
+      const countSnap = await db.collection('students').where('tutor_id', '==', tutorId).get();
+      if (countSnap.size >= maxStudents) {
+        return res.status(403).json({
+          code: 'PLAN_STUDENT_LIMIT',
+          message: `Student limit reached for your plan (${maxStudents})`,
+          max_students: maxStudents,
+        });
+      }
+    }
+
     const ratePerHour = Number(rate_per_hour);
     if (Number.isNaN(ratePerHour) || ratePerHour < 0) {
       return res.status(400).json({ message: 'rate_per_hour must be a non-negative number' });
@@ -171,7 +197,10 @@ router.post('/', async (req, res, next) => {
       billingType === 'package' ? parseBalanceAmount(balance_lessons, rateUnit, 0) : 0;
     const initialCreditLimit =
       billingType === 'postpaid' ? parseNonNegativeInt(credit_limit, 0) : 0;
-    const botActive = Boolean(bot_active);
+    let botActive = Boolean(bot_active);
+    if (botActive && !hasTelegramAccess(planStatus)) {
+      botActive = false;
+    }
     const meetingLink = normalizeMeetingLink(meeting_link);
     if (meeting_link !== undefined && meetingLink === undefined) {
       return res.status(400).json({ message: 'Invalid meeting_link' });
@@ -312,7 +341,14 @@ router.put('/:id', async (req, res, next) => {
       patch.color_hex = normalized;
     }
     if (bot_active !== undefined) {
-      patch.bot_active = Boolean(bot_active);
+      const nextActive = Boolean(bot_active);
+      if (nextActive && !hasTelegramAccess(await loadTutorSubscriptionStatus(tutorId))) {
+        return res.status(403).json({
+          code: 'PLAN_TELEGRAM_REQUIRED',
+          message: 'Telegram bot requires Pro or Trial',
+        });
+      }
+      patch.bot_active = nextActive;
     }
     if (meeting_link !== undefined) {
       const meetingLink = normalizeMeetingLink(meeting_link);
@@ -685,6 +721,12 @@ router.post('/:id/balance-adjust', async (req, res, next) => {
 router.put('/:id/telegram-settings', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
+    if (!hasTelegramAccess(await loadTutorSubscriptionStatus(tutorId))) {
+      return res.status(403).json({
+        code: 'PLAN_TELEGRAM_REQUIRED',
+        message: 'Telegram bot requires Pro or Trial',
+      });
+    }
     const studentRef = db.collection('students').doc(req.params.id);
     const studentSnap = await studentRef.get();
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
@@ -721,6 +763,12 @@ async function findConflictingTelegramChat(chatId, excludeStudentId) {
 router.post('/:id/telegram-link-manual', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
+    if (!hasTelegramAccess(await loadTutorSubscriptionStatus(tutorId))) {
+      return res.status(403).json({
+        code: 'PLAN_TELEGRAM_REQUIRED',
+        message: 'Telegram bot requires Pro or Trial',
+      });
+    }
     const chatId = String(req.body.chat_id || '').trim();
     const role = req.body.role === 'parent' ? 'parent' : 'student';
     if (!/^-?\d{5,20}$/.test(chatId)) {

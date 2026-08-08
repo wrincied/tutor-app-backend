@@ -19,13 +19,36 @@ const {
   FALLBACK_EUR_RATES,
 } = require('../utils/currencyConvert');
 const { computeTaxProjection } = require('../utils/financeTax');
-const { normalizeTaxMode } = require('../utils/userProfile');
+const { normalizeTaxMode, hasFinanceAccess, subscriptionLabel } = require('../utils/userProfile');
 const { collectPatchChanges, listActivityLogs, writeActivityLog } = require('../utils/activityLog');
 const {
   classifyFinanceOrphan,
   expandFinanceOccurrences,
   financeOccurrenceRange,
 } = require('../utils/lessonRecurrence');
+
+async function loadTutorSubscriptionStatus(tutorId) {
+  const snap = await db.collection('users').doc(String(tutorId)).get();
+  if (!snap.exists) {
+    return 'free';
+  }
+  return subscriptionLabel(snap.data()?.subscription_status);
+}
+
+async function requireFinancePlan(req, res, next) {
+  try {
+    const status = await loadTutorSubscriptionStatus(req.user.id);
+    if (!hasFinanceAccess(status)) {
+      return res.status(403).json({
+        code: 'PLAN_FINANCE_REQUIRED',
+        message: 'Finance module requires Basis or Pro',
+      });
+    }
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+}
 
 const COUNTRY_CURRENCY = {
   AT: 'EUR',
@@ -187,7 +210,7 @@ function addIncomeByCurrency(bucket, currency, amount) {
 router.use(auth);
 router.use(requireVerifiedEmail);
 
-router.get('/activity-logs', async (req, res, next) => {
+router.get('/activity-logs', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const limit = req.query.limit;
@@ -198,7 +221,7 @@ router.get('/activity-logs', async (req, res, next) => {
   }
 });
 
-router.get('/expenses', async (req, res, next) => {
+router.get('/expenses', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const snap = await db.collection('expenses').where('tutor', '==', tutorId).get();
@@ -214,7 +237,7 @@ router.get('/expenses', async (req, res, next) => {
   }
 });
 
-router.post('/expenses', async (req, res, next) => {
+router.post('/expenses', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const title = req.body.title ? String(req.body.title).trim() : '';
@@ -278,7 +301,7 @@ router.post('/expenses', async (req, res, next) => {
   }
 });
 
-router.put('/expenses/:id', async (req, res, next) => {
+router.put('/expenses/:id', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const ref = db.collection('expenses').doc(req.params.id);
@@ -345,7 +368,7 @@ router.put('/expenses/:id', async (req, res, next) => {
   }
 });
 
-router.delete('/expenses/:id', async (req, res, next) => {
+router.delete('/expenses/:id', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const ref = db.collection('expenses').doc(req.params.id);

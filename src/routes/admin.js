@@ -6,7 +6,7 @@ const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const { db, FieldValue, admin } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const { enrichUserProfile, subscriptionLabel } = require('../utils/userProfile');
-const { getSubscriptionPricing } = require('../utils/subscriptionPricing');
+const { getPlanPricing, getSubscriptionPricing, resolvePricingCountry } = require('../utils/subscriptionPricing');
 const {
   buildAdminDashboard,
   DEFAULT_DASHBOARD_WIDGETS,
@@ -40,8 +40,8 @@ function parseTrialEndsAt(value) {
 
 function buildSubscriptionPatch(statusRaw, trialEndsAtRaw) {
   const status = subscriptionLabel(statusRaw);
-  if (status !== 'free' && status !== 'pro' && status !== 'trial') {
-    return { ok: false, message: 'subscription_status must be free, pro, or trial' };
+  if (status !== 'free' && status !== 'basis' && status !== 'pro' && status !== 'trial') {
+    return { ok: false, message: 'subscription_status must be free, basis, pro, or trial' };
   }
 
   const patch = {
@@ -174,6 +174,8 @@ router.get('/stats', async (req, res, next) => {
     const snap = await db.collection('users').get();
     let totalUsers = 0;
     let paidUsers = 0;
+    let basisUsers = 0;
+    let proUsers = 0;
     let trialUsers = 0;
     const estimatedMrr = {};
 
@@ -181,9 +183,18 @@ router.get('/stats', async (req, res, next) => {
       totalUsers += 1;
       const data = doc.data();
       const status = subscriptionLabel(data.subscription_status);
-      if (status === 'pro') {
+      if (status === 'pro' || status === 'basis') {
         paidUsers += 1;
-        const pricing = getSubscriptionPricing(data.country_settings);
+        if (status === 'basis') {
+          basisUsers += 1;
+        } else {
+          proUsers += 1;
+        }
+        const pricingCountry = resolvePricingCountry(data.tax_mode, data.country_settings);
+        const pricing =
+          status === 'basis'
+            ? getPlanPricing('basis', pricingCountry)
+            : getSubscriptionPricing(data.country_settings);
         estimatedMrr[pricing.currency] = (estimatedMrr[pricing.currency] || 0) + pricing.monthly;
       } else if (status === 'trial') {
         trialUsers += 1;
@@ -196,6 +207,8 @@ router.get('/stats', async (req, res, next) => {
     res.json({
       totalUsers,
       paidUsers,
+      basisUsers,
+      proUsers,
       trialUsers,
       conversionPercent,
       estimatedMrr,

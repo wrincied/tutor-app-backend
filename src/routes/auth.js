@@ -13,8 +13,10 @@ const { DEFAULT_COUNTRY, normalizeCountryCode, countryFromTaxMode } = require('.
 const {
   DEFAULT_WORKSPACE,
   DEFAULT_WORKING_HOURS,
+  DEFAULT_VACATION,
   normalizeWorkspace,
   normalizeWorkingHours,
+  normalizeVacation,
 } = require('../utils/userWorkspaceSettings');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
@@ -44,6 +46,7 @@ async function ensureTutorUserDoc(req) {
       subscription_status: 'free',
       workspace: DEFAULT_WORKSPACE,
       workingHours: DEFAULT_WORKING_HOURS,
+      vacation: DEFAULT_VACATION,
       role: 'tutor',
       onboarding_completed: false,
       data_consent_accepted: null,
@@ -122,7 +125,8 @@ router.put('/me', auth, async (req, res, next) => {
     }
 
     const userData = userSnap.data();
-    const { name, first_name, last_name, tax_mode, timezone, workspace, workingHours } = req.body;
+    const { name, first_name, last_name, tax_mode, timezone, workspace, workingHours, vacation } =
+      req.body;
 
     const patch = { updatedAt: FieldValue.serverTimestamp() };
 
@@ -158,6 +162,9 @@ router.put('/me', auth, async (req, res, next) => {
     }
     if (workingHours !== undefined) {
       patch.workingHours = normalizeWorkingHours(workingHours);
+    }
+    if (vacation !== undefined) {
+      patch.vacation = normalizeVacation(vacation);
     }
 
     await userRef.update(patch);

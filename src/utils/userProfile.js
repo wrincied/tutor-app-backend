@@ -1,4 +1,4 @@
-/** @typedef {'free' | 'pro' | 'trial'} SubscriptionStatus */
+/** @typedef {'free' | 'basis' | 'pro' | 'trial'} SubscriptionStatus */
 
 const {
   getSubscriptionPricing,
@@ -6,7 +6,7 @@ const {
   resolvePricingCountry,
   DEFAULT_COUNTRY,
 } = require('./subscriptionPricing');
-const { normalizeWorkspace, normalizeWorkingHours } = require('./userWorkspaceSettings');
+const { normalizeWorkspace, normalizeWorkingHours, normalizeVacation } = require('./userWorkspaceSettings');
 
 const ALLOWED_TAX_MODES = new Set([
   'at-self-employed',
@@ -20,7 +20,7 @@ const ALLOWED_TAX_MODES = new Set([
   'ua-fop3',
 ]);
 
-const ALLOWED_SUBSCRIPTION = new Set(['free', 'pro', 'trial']);
+const ALLOWED_SUBSCRIPTION = new Set(['free', 'basis', 'pro', 'trial']);
 
 /** Legacy Firestore values → canonical tax_mode. */
 function normalizeTaxMode(raw) {
@@ -57,7 +57,55 @@ function normalizeRole(raw) {
 }
 
 function canPurchaseSubscription(user) {
-  return isTaxModeConfigured(user?.tax_mode) && subscriptionLabel(user?.subscription_status) === 'free';
+  const status = subscriptionLabel(user?.subscription_status);
+  return isTaxModeConfigured(user?.tax_mode) && (status === 'free' || status === 'basis');
+}
+
+function canPurchasePlan(user, plan) {
+  if (!isTaxModeConfigured(user?.tax_mode)) {
+    return false;
+  }
+  const status = subscriptionLabel(user?.subscription_status);
+  if (plan === 'basis') {
+    return status === 'free';
+  }
+  if (plan === 'pro' || plan === 'trial') {
+    return status === 'free' || status === 'basis';
+  }
+  return false;
+}
+
+/** null = unlimited */
+const PLAN_STUDENT_LIMITS = Object.freeze({
+  free: 3,
+  basis: 10,
+  pro: null,
+  trial: null,
+});
+
+function maxStudentsForPlan(status) {
+  const s = subscriptionLabel(status);
+  return Object.prototype.hasOwnProperty.call(PLAN_STUDENT_LIMITS, s)
+    ? PLAN_STUDENT_LIMITS[s]
+    : PLAN_STUDENT_LIMITS.free;
+}
+
+function hasFinanceAccess(status) {
+  const s = subscriptionLabel(status);
+  return s === 'basis' || s === 'pro' || s === 'trial';
+}
+
+function hasTelegramAccess(status) {
+  const s = subscriptionLabel(status);
+  return s === 'pro' || s === 'trial';
+}
+
+function getPlanEntitlements(status) {
+  return {
+    max_students: maxStudentsForPlan(status),
+    has_finance: hasFinanceAccess(status),
+    has_telegram: hasTelegramAccess(status),
+  };
 }
 
 function enrichUserProfile(user) {
@@ -69,6 +117,7 @@ function enrichUserProfile(user) {
   const last_name = String(user.last_name ?? '').trim();
   const name =
     String(user.name ?? '').trim() || `${first_name} ${last_name}`.trim();
+  const subscription_status = subscriptionLabel(user.subscription_status);
 
   return {
     ...user,
@@ -91,22 +140,34 @@ function enrichUserProfile(user) {
     country_settings,
     tax_mode,
     tax_mode_configured: isTaxModeConfigured(tax_mode),
-    subscription_status: subscriptionLabel(user.subscription_status),
+    subscription_status,
+    plan_entitlements: getPlanEntitlements(subscription_status),
     subscription_pricing: getSubscriptionPricing(pricingCountry),
+    trial_ends_at: user.trial_ends_at ?? null,
+    cancel_at_period_end: user.cancel_at_period_end === true,
+    subscription_cancel_at: user.subscription_cancel_at ?? null,
+    has_stripe_subscription: Boolean(user.stripe_subscription_id),
     role: normalizeRole(user.role),
     workspace: normalizeWorkspace(user.workspace),
     workingHours: normalizeWorkingHours(user.workingHours),
+    vacation: normalizeVacation(user.vacation),
   };
 }
 
 module.exports = {
   ALLOWED_TAX_MODES,
   ALLOWED_SUBSCRIPTION,
+  PLAN_STUDENT_LIMITS,
   normalizeTaxMode,
   isTaxModeConfigured,
   assertConfigurableTaxMode,
   subscriptionLabel,
   normalizeRole,
   canPurchaseSubscription,
+  canPurchasePlan,
+  maxStudentsForPlan,
+  hasFinanceAccess,
+  hasTelegramAccess,
+  getPlanEntitlements,
   enrichUserProfile,
 };

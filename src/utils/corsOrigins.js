@@ -1,6 +1,7 @@
 const DEFAULT_ORIGINS = [
   'http://localhost:4200',
   'http://localhost:4300',
+  'http://localhost:4400',
   'https://tutor-app--tutorassis.europe-west4.hosted.app',
   'https://tutorassis.web.app',
   'https://tutorassis.firebaseapp.com',
@@ -37,7 +38,44 @@ function primaryFrontendUrl() {
       return first;
     }
   }
-  return 'https://tutor-app--tutorassis.europe-west4.hosted.app';
+  // Local API without FRONTEND_URL should never bounce users to prod App Hosting.
+  if (process.env.NODE_ENV !== 'production') {
+    return 'http://localhost:4200';
+  }
+  return 'https://simple4u-64822.web.app';
+}
+
+/**
+ * Deep link into the Angular hash router.
+ * Query string goes BEFORE the hash so Stripe can append session_id safely
+ * and Angular still lands on the right route.
+ * Example: spaDeepLink('/app/home', { billing: 'success' })
+ * → http://localhost:4200/?billing=success#/app/home
+ */
+function spaDeepLink(pathWithQuery, query) {
+  const base = primaryFrontendUrl();
+  let path = String(pathWithQuery || '/');
+  let inlineQuery = '';
+  const qIdx = path.indexOf('?');
+  if (qIdx >= 0) {
+    inlineQuery = path.slice(qIdx + 1);
+    path = path.slice(0, qIdx);
+  }
+  if (!path.startsWith('/')) {
+    path = `/${path}`;
+  }
+
+  const params = new URLSearchParams(inlineQuery);
+  if (query && typeof query === 'object') {
+    for (const [key, value] of Object.entries(query)) {
+      if (value == null || value === '') {
+        continue;
+      }
+      params.set(key, String(value));
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${base}/?${qs}#${path}` : `${base}/#${path}`;
 }
 
 function createCorsOptions() {
@@ -61,5 +99,6 @@ function createCorsOptions() {
 module.exports = {
   parseCorsOrigins,
   primaryFrontendUrl,
+  spaDeepLink,
   createCorsOptions,
 };
