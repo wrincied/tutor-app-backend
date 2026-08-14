@@ -20,7 +20,7 @@ const {
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
 const { normalizeRecurrenceFields, dayKeyFromDate, lessonWithEffectiveSchedule } = require('../utils/lessonRecurrence');
-const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates } = require('../services/lessonOccurrence');
+const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates, hadOccurrenceBillingMarker } = require('../services/lessonOccurrence');
 const { notifyLessonMoved } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
 const {
@@ -208,6 +208,8 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       rrule: recurrence.rrule,
       exdates: [],
       completedDates: [],
+      missedDates: [],
+      canceledDates: [],
       reminder_sent: false,
       balance_debited: false,
       billing_processed: false,
@@ -295,11 +297,11 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
           message: 'should_deduct_balance is required when status is missed or canceled',
         });
       }
-      const exdates = uniqueDates(existing.exdates);
-      const occurrenceWasExcluded = occurrenceDate && exdates.includes(occurrenceDate);
+      const occurrenceWasMarked =
+        occurrenceDate && hadOccurrenceBillingMarker(existing, occurrenceDate);
       if (
         occurrenceStatusRaw === 'scheduled' &&
-        occurrenceWasExcluded &&
+        occurrenceWasMarked &&
         (await occurrenceBalanceDebited(lessonRef.id, occurrenceDate)) &&
         !Object.prototype.hasOwnProperty.call(req.body, 'should_refund_balance')
       ) {
@@ -412,14 +414,25 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     if (notes !== undefined) {
       patch.notes = notes ? String(notes).trim() : '';
     }
-    if (Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt')) {
+
+    const occurrenceStatusOnly =
+      seriesRecurring &&
+      Boolean(occurrenceDate) &&
+      occurrenceStatusRaw !== undefined;
+
+    // Virtual occurrence saves send that day's scheduledAt — do not move series anchor.
+    if (
+      Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt') &&
+      !occurrenceStatusOnly
+    ) {
       patch.scheduledAt = scheduledAt ? String(scheduledAt) : null;
     }
 
     if (
-      Object.prototype.hasOwnProperty.call(req.body, 'isRecurring') ||
-      Object.prototype.hasOwnProperty.call(req.body, 'rrule') ||
-      Object.prototype.hasOwnProperty.call(req.body, 'startDate')
+      !occurrenceStatusOnly &&
+      (Object.prototype.hasOwnProperty.call(req.body, 'isRecurring') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'rrule') ||
+        Object.prototype.hasOwnProperty.call(req.body, 'startDate'))
     ) {
       const effectiveScheduledAt = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt')
         ? scheduledAt
@@ -444,17 +457,21 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       if (seriesRecurring && !recurrence.isRecurring) {
         patch.exdates = [];
         patch.completedDates = [];
+        patch.missedDates = [];
+        patch.canceledDates = [];
       }
     }
 
-    const scheduleChanged = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt');
+    const scheduleChanged =
+      !occurrenceStatusOnly &&
+      Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt');
     const durationChanged = Object.prototype.hasOwnProperty.call(req.body, 'lesson_duration');
     if (scheduleChanged || durationChanged) {
       patch.reminder_sent = false;
       patch.post_lesson_notified = false;
     }
 
-    const nextScheduledAt = Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt')
+    const nextScheduledAt = scheduleChanged
       ? scheduledAt
         ? String(scheduledAt)
         : null

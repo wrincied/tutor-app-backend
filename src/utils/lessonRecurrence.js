@@ -144,8 +144,16 @@ function statusForOccurrence(lesson, occurrenceDate) {
   if (completed.has(occurrenceDate)) {
     return 'completed';
   }
+  const canceled = new Set((lesson.canceledDates ?? []).map((item) => String(item).slice(0, 10)));
+  if (canceled.has(occurrenceDate)) {
+    return 'canceled';
+  }
+  const missed = new Set((lesson.missedDates ?? []).map((item) => String(item).slice(0, 10)));
+  if (missed.has(occurrenceDate)) {
+    return 'missed';
+  }
   const masterStatus = normalizeLessonStatus(lesson.status);
-  if (masterStatus === 'completed') {
+  if (masterStatus === 'completed' || masterStatus === 'missed' || masterStatus === 'canceled') {
     return 'scheduled';
   }
   return masterStatus;
@@ -373,6 +381,8 @@ function normalizeRecurrenceFields(body, scheduledAt) {
       startDate: null,
       exdates: [],
       completedDates: body.completedDates ?? [],
+      missedDates: body.missedDates ?? [],
+      canceledDates: body.canceledDates ?? [],
     };
   }
 
@@ -389,6 +399,8 @@ function normalizeRecurrenceFields(body, scheduledAt) {
     startDate: isRecurring && startDate ? startDate : null,
     exdates: Array.isArray(body.exdates) ? body.exdates : undefined,
     completedDates: Array.isArray(body.completedDates) ? body.completedDates : undefined,
+    missedDates: Array.isArray(body.missedDates) ? body.missedDates : undefined,
+    canceledDates: Array.isArray(body.canceledDates) ? body.canceledDates : undefined,
   };
 }
 
