@@ -288,6 +288,63 @@ async function debitRecurringOccurrenceIfDue({
   return { debited: true, occurrenceDate };
 }
 
+function occurrenceStatusArrays(existing) {
+  return {
+    completedDates: uniqueDates(existing.completedDates),
+    missedDates: uniqueDates(existing.missedDates),
+    canceledDates: uniqueDates(existing.canceledDates),
+    exdates: uniqueDates(existing.exdates),
+  };
+}
+
+/** Keep occurrence visible: missed/canceled use date lists, not exdates (exdates = deleted). */
+function withOccurrenceStatusDates(existing, occurrenceDate, nextStatus) {
+  const { completedDates, missedDates, canceledDates, exdates } = occurrenceStatusArrays(existing);
+  const without = (list) => list.filter((date) => date !== occurrenceDate);
+  if (nextStatus === 'completed') {
+    return {
+      completedDates: uniqueDates([...without(completedDates), occurrenceDate]),
+      missedDates: without(missedDates),
+      canceledDates: without(canceledDates),
+      exdates: without(exdates),
+    };
+  }
+  if (nextStatus === 'missed') {
+    return {
+      completedDates: without(completedDates),
+      missedDates: uniqueDates([...without(missedDates), occurrenceDate]),
+      canceledDates: without(canceledDates),
+      exdates: without(exdates),
+    };
+  }
+  if (nextStatus === 'canceled') {
+    return {
+      completedDates: without(completedDates),
+      missedDates: without(missedDates),
+      canceledDates: uniqueDates([...without(canceledDates), occurrenceDate]),
+      exdates: without(exdates),
+    };
+  }
+  // scheduled / restore
+  return {
+    completedDates: without(completedDates),
+    missedDates: without(missedDates),
+    canceledDates: without(canceledDates),
+    exdates: without(exdates),
+  };
+}
+
+function hadOccurrenceBillingMarker(existing, occurrenceDate) {
+  const { completedDates, missedDates, canceledDates, exdates } =
+    occurrenceStatusArrays(existing);
+  return (
+    completedDates.includes(occurrenceDate) ||
+    missedDates.includes(occurrenceDate) ||
+    canceledDates.includes(occurrenceDate) ||
+    exdates.includes(occurrenceDate)
+  );
+}
+
 async function applyRecurringOccurrenceStatus({
   tutorId,
   lessonRef,
@@ -302,8 +359,7 @@ async function applyRecurringOccurrenceStatus({
   billImmediately = true,
 }) {
   const normalizedStatus = normalizeLessonStatus(nextStatus);
-  const completedDates = uniqueDates(existing.completedDates);
-  const exdates = uniqueDates(existing.exdates);
+  const { completedDates } = occurrenceStatusArrays(existing);
   const wasCompleted = completedDates.includes(occurrenceDate);
   const billingType = normalizeBillingType(studentSnap?.data()?.billing_type);
   const lessonId = lessonRef.id;
@@ -326,11 +382,9 @@ async function applyRecurringOccurrenceStatus({
       err.statusCode = 400;
       throw err;
     }
-    const nextCompleted = [...completedDates, occurrenceDate];
-    const nextExdates = exdates.filter((date) => date !== occurrenceDate);
+    const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'completed');
     batch.update(lessonRef, {
-      completedDates: nextCompleted,
-      exdates: nextExdates,
+      ...dates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -371,10 +425,9 @@ async function applyRecurringOccurrenceStatus({
       err.statusCode = 400;
       throw err;
     }
-    const nextExdates = exdates.filter((date) => date !== occurrenceDate);
+    const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'completed');
     batch.update(lessonRef, {
-      completedDates,
-      exdates: nextExdates,
+      ...dates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -406,10 +459,10 @@ async function applyRecurringOccurrenceStatus({
     return { completed: true, occurrenceDate, repaired: true };
   }
 
-  if (!isCompletedStatus(normalizedStatus) && wasCompleted) {
-    const nextCompleted = completedDates.filter((date) => date !== occurrenceDate);
+  if (!isCompletedStatus(normalizedStatus) && wasCompleted && normalizedStatus === 'scheduled') {
+    const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'scheduled');
     batch.update(lessonRef, {
-      completedDates: nextCompleted,
+      ...dates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -441,84 +494,107 @@ async function applyRecurringOccurrenceStatus({
     return { uncompleted: true, occurrenceDate };
   }
 
-  if (
-    (normalizedStatus === 'missed' || normalizedStatus === 'canceled') &&
-    shouldDeduct === true &&
-    !wasCompleted
-  ) {
-    console.log('[billing] occurrence missed/canceled deduct', {
-      lessonId: lessonRef.id,
-      occurrenceDate,
-      normalizedStatus,
-      billingType,
-      units,
-      balanceBefore: studentSnap?.data()?.balance_lessons,
-      studentId,
-    });
-    const nextExdates = uniqueDates([...exdates, occurrenceDate]);
+  if (normalizedStatus === 'missed' || normalizedStatus === 'canceled') {
+    const dates = withOccurrenceStatusDates(existing, occurrenceDate, normalizedStatus);
     batch.update(lessonRef, {
-      exdates: nextExdates,
+      ...dates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
+
+    const alreadyDebited = await occurrenceBalanceDebited(lessonId, occurrenceDate);
     const deductReason =
       normalizedStatus === 'canceled'
         ? 'lesson_canceled_deduct_occurrence'
         : 'lesson_missed_deduct_occurrence';
-    if (billingType === 'package') {
-      const debitResult = debitPackageOccurrence(batch, {
-        tutorId,
-        studentRef,
-        lessonRef,
-        studentId,
-        studentName,
+
+    if (shouldDeduct === true && !alreadyDebited) {
+      console.log('[billing] occurrence missed/canceled deduct', {
         lessonId: lessonRef.id,
         occurrenceDate,
-        amount: units,
-        currentBalance: studentSnap?.data()?.balance_lessons,
-        // Явный выбор «списать» — разрешаем уход в минус (долг).
-        allowNegative: true,
-        reason: deductReason,
-      });
-      console.log('[billing] occurrence package debit result', debitResult);
-    } else {
-      debitPostpaidOccurrence(batch, {
-        tutorId,
-        studentRef,
-        lessonRef,
+        normalizedStatus,
+        billingType,
+        units,
+        balanceBefore: studentSnap?.data()?.balance_lessons,
         studentId,
-        studentName,
-        lessonId: lessonRef.id,
-        occurrenceDate,
-        amount: units,
-        reason: deductReason,
       });
-      console.log('[billing] occurrence postpaid unpaid increment', { units });
+      if (billingType === 'package') {
+        const debitResult = debitPackageOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId: lessonRef.id,
+          occurrenceDate,
+          amount: units,
+          currentBalance: studentSnap?.data()?.balance_lessons,
+          // Явный выбор «списать» — разрешаем уход в минус (долг).
+          allowNegative: true,
+          reason: deductReason,
+        });
+        console.log('[billing] occurrence package debit result', debitResult);
+      } else {
+        debitPostpaidOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId: lessonRef.id,
+          occurrenceDate,
+          amount: units,
+          reason: deductReason,
+        });
+        console.log('[billing] occurrence postpaid unpaid increment', { units });
+      }
+      await batch.commit();
+      return { marked: normalizedStatus, occurrenceDate, debited: true };
+    }
+
+    // completed → missed/canceled without keep-charge: refund prior completion debit.
+    if (shouldDeduct !== true && wasCompleted && alreadyDebited) {
+      if (billingType === 'package') {
+        creditPackageOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId: lessonRef.id,
+          occurrenceDate,
+          amount: units,
+        });
+      } else {
+        creditPostpaidOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId: lessonRef.id,
+          occurrenceDate,
+          amount: units,
+        });
+      }
     }
     await batch.commit();
-    return { excluded: true, occurrenceDate, debited: true };
-  }
-
-  if (normalizedStatus === 'missed' || normalizedStatus === 'canceled') {
-    const nextExdates = uniqueDates([...exdates, occurrenceDate]);
-    batch.update(lessonRef, {
-      exdates: nextExdates,
-      status: 'scheduled',
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-    await batch.commit();
-    return { excluded: true, occurrenceDate };
+    return {
+      marked: normalizedStatus,
+      occurrenceDate,
+      debited: shouldDeduct === true && alreadyDebited,
+    };
   }
 
   if (normalizedStatus === 'scheduled') {
-    const wasExcluded = exdates.includes(occurrenceDate);
-    const nextExdates = exdates.filter((date) => date !== occurrenceDate);
+    const hadMarker = hadOccurrenceBillingMarker(existing, occurrenceDate);
+    const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'scheduled');
     batch.update(lessonRef, {
-      exdates: nextExdates,
+      ...dates,
       status: 'scheduled',
       updatedAt: FieldValue.serverTimestamp(),
     });
-    if (wasExcluded && shouldRefund === true) {
+    if (hadMarker && shouldRefund === true) {
       const debited = await occurrenceBalanceDebited(lessonId, occurrenceDate);
       if (debited) {
         if (billingType === 'package') {
@@ -554,13 +630,11 @@ async function applyRecurringOccurrenceStatus({
 }
 
 async function excludeRecurringOccurrence({ tutorId, lessonRef, existing, occurrenceDate }) {
-  const exdates = uniqueDates([...(existing.exdates ?? []), occurrenceDate]);
-  const completedDates = uniqueDates(existing.completedDates).filter(
-    (date) => date !== occurrenceDate,
-  );
+  const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'scheduled');
+  const exdates = uniqueDates([...(existing.exdates ?? []), occurrenceDate]).filter(Boolean);
   await lessonRef.update({
+    ...dates,
     exdates,
-    completedDates,
     status: 'scheduled',
     updatedAt: FieldValue.serverTimestamp(),
   });
@@ -671,4 +745,5 @@ module.exports = {
   billDueRecurringOccurrences,
   excludeRecurringOccurrence,
   occurrenceBalanceDebited,
+  hadOccurrenceBillingMarker,
 };
