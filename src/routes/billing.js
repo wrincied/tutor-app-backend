@@ -485,6 +485,11 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
 
     const session = await stripe.checkout.sessions.create(sessionParams);
 
+    await db.collection('users').doc(req.user.id).update({
+      stripe_checkout_session_id: session.id,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
     res.json({
       url: session.url,
       pricing,
@@ -840,7 +845,41 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
     if (!subId) {
-      return res.status(404).json({ message: 'No active Stripe subscription found' });
+      // Abandoned / fake Trial: no active Stripe subscription → force Free.
+      const openSessionId = String(user.stripe_checkout_session_id || '').trim();
+      if (openSessionId) {
+        try {
+          await stripe.checkout.sessions.expire(openSessionId);
+        } catch (err) {
+          console.warn('[billing] expire checkout session failed', openSessionId, err.message);
+        }
+      }
+
+      const current = String(user.subscription_status || 'free').toLowerCase();
+      if (current === 'free' && !user.stripe_subscription_id && !user.trial_ends_at) {
+        const updated = enrichUserProfile(user);
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+
+      await db.collection('users').doc(req.user.id).update({
+        subscription_status: 'free',
+        trial_ends_at: null,
+        stripe_subscription_id: FieldValue.delete(),
+        stripe_checkout_session_id: FieldValue.delete(),
+        cancel_at_period_end: false,
+        subscription_cancel_at: null,
+        subscription_current_period_end: null,
+        pending_plan: FieldValue.delete(),
+        pending_plan_at: FieldValue.delete(),
+        stripe_schedule_id: FieldValue.delete(),
+        subscription_updated_at: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      const updated = enrichUserProfile(serializeDoc(await db.collection('users').doc(req.user.id).get()));
+      const { password_hash: _ph, ...safeUser } = updated;
+      return res.json(safeUser);
     }
 
     const subscription = await stripe.subscriptions.retrieve(subId);
