@@ -30,4 +30,40 @@ env:
     availability:
       - RUNTIME
 
-# Остальные секреты (JWT, Stripe, Firebase SA) — в Firebase Console → App Hosting → Environment.
+  - variable: RECAPTCHA_SECRET_KEY
+    secret: RECAPTCHA_SECRET_KEY
+    availability:
+      - RUNTIME
+
+  - variable: CONTACT_EMAIL
+    secret: CONTACT_EMAIL
+    availability:
+      - RUNTIME
+
+  - variable: SMTP_HOST
+    secret: SMTP_HOST
+    availability:
+      - RUNTIME
+
+  - variable: SMTP_PORT
+    secret: SMTP_PORT
+    availability:
+      - RUNTIME
+
+  - variable: SMTP_USER
+    secret: SMTP_USER
+    availability:
+      - RUNTIME
+
+  - variable: SMTP_PASS
+    secret: SMTP_PASS
+    availability:
+      - RUNTIME
+
+  - variable: EMAIL_FROM
+    secret: EMAIL_FROM
+    availability:
+      - RUNTIME
+
+# Stripe / Tribute / Firebase SA — Firebase Console → App Hosting → Environment
+# (live keys are not in this repo; set STRIPE_* and TRIBUTE_* there).
