@@ -83,12 +83,12 @@ function parseDateQuery(value) {
 }
 
 /**
- * Home summary: не грузим всю историю уроков.
+ * Summary с from/to: не грузим всю историю уроков.
  * Берём recurring-серии + one-off в окне дат (±1 день из‑за TZ).
  * При отсутствии индекса — fallback на полный scan.
  */
-async function fetchLessonsSnapForSummary(tutorId, { homeScope, from, to }) {
-  if (!homeScope || !from || !to) {
+async function fetchLessonsSnapForSummary(tutorId, { from, to }) {
+  if (!from || !to) {
     return db.collection('lessons').where('tutor', '==', tutorId).get();
   }
 
@@ -130,7 +130,7 @@ async function fetchLessonsSnapForSummary(tutorId, { homeScope, from, to }) {
     };
   } catch (err) {
     console.warn(
-      '[finance/summary] home narrow lessons query failed, fallback full scan:',
+      '[finance/summary] narrow lessons query failed, fallback full scan:',
       err?.message || err,
     );
     return db.collection('lessons').where('tutor', '==', tutorId).get();
@@ -416,7 +416,7 @@ router.get('/summary', async (req, res, next) => {
     });
 
     const [lessonsSnap, expensesSnap, userSnap, studentsSnap] = await Promise.all([
-      fetchLessonsSnapForSummary(tutorId, { homeScope, from, to }),
+      fetchLessonsSnapForSummary(tutorId, { from, to }),
       homeScope
         ? Promise.resolve({ forEach() {}, empty: true, size: 0 })
         : db.collection('expenses').where('tutor', '==', tutorId).get(),
@@ -424,8 +424,9 @@ router.get('/summary', async (req, res, next) => {
       db.collection('students').where('tutor_id', '==', tutorId).get(),
     ]);
 
-    if (homeScope) {
-      console.log('[finance/summary] home lessons loaded', {
+    if (from && to) {
+      console.log('[finance/summary] lessons loaded', {
+        homeScope,
         count: lessonsSnap.size,
         ms: Date.now() - lessonsStarted,
       });

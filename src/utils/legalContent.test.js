@@ -55,8 +55,19 @@ describe('legalContent sanitize', () => {
     }
     assert.match(body, /support@simple4u\.com/);
     assert.match(body, /Arsen Mileuski/);
-    assert.match(body, /Köflacher Gasse/);
+    assert.match(body, /Köflacher Gasse 9, Tür 218\.2/);
     assert.doesNotMatch(body, /\[Firmenname\]/);
+  });
+
+  it('default impressum includes GISA, Gewerbe wording and WKO Firmen A-Z', () => {
+    const doc = defaultLegalDoc('impressum');
+    assert.ok(doc);
+    const body = doc.body;
+    assert.match(body, /39994318/);
+    assert.match(body, /Dienstleistungen in der automatischen Datenverarbeitung/);
+    assert.match(body, /firmen\.wko\.at\/arsen-mileuski/);
+    assert.match(body, /Tür 218\.2/);
+    assert.match(body, /Magistrat der Stadt Graz/);
   });
 });
 

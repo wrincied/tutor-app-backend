@@ -15,7 +15,16 @@ const {
   resolvePricingCountry,
   toStripeUnitAmount,
 } = require('../utils/subscriptionPricing');
-const { spaDeepLink } = require('../utils/corsOrigins');
+const { spaDeepLink, spaPathLink } = require('../utils/corsOrigins');
+const {
+  paymentProviderForCountry,
+  resolvePaymentProvider,
+} = require('../utils/paymentProvider');
+const {
+  isTributeConfigured,
+  createTributeShopOrder,
+  cancelTributeShopOrder,
+} = require('../utils/tribute');
 
 const router = express.Router();
 
@@ -114,6 +123,155 @@ async function resolveStripeSubscriptionId(stripe, user) {
   return null;
 }
 
+function stripeUnixToIso(unix) {
+  if (!unix || !Number.isFinite(Number(unix))) {
+    return null;
+  }
+  return new Date(Number(unix) * 1000).toISOString();
+}
+
+function subscriptionIntervalOf(subscription) {
+  const item = subscription?.items?.data?.[0];
+  return item?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+}
+
+function subscriptionPeriodEndUnix(subscription) {
+  if (subscription?.status === 'trialing' && subscription.trial_end) {
+    return subscription.trial_end;
+  }
+  if (subscription?.current_period_end) {
+    return subscription.current_period_end;
+  }
+  // Newer Stripe API: period lives on subscription items.
+  const itemEnd = subscription?.items?.data?.[0]?.current_period_end;
+  return itemEnd || null;
+}
+
+function priceIdOfPhaseItem(item) {
+  if (!item) {
+    return null;
+  }
+  if (typeof item.price === 'string') {
+    return item.price;
+  }
+  return item.price?.id || null;
+}
+
+/**
+ * Schedule Pro/Trial → Basis at current_period_end (keeps Pro entitlements until then).
+ * Important: once a schedule manages the subscription, do NOT call subscriptions.update
+ * (Stripe returns 400). Metadata goes on the schedule / phases instead.
+ */
+async function scheduleBasisDowngradeAtPeriodEnd(stripe, subscription, basisPriceId, phaseMeta) {
+  const keepMeta = {
+    ...(subscription.metadata || {}),
+    pending_plan: 'basis',
+  };
+  if (!keepMeta.plan || keepMeta.plan === 'basis') {
+    keepMeta.plan = subscription.status === 'trialing' ? 'trial' : 'pro';
+  }
+
+  const existingScheduleId =
+    typeof subscription.schedule === 'string'
+      ? subscription.schedule
+      : subscription.schedule?.id || null;
+
+  // Metadata on the subscription must be set before it becomes schedule-managed.
+  if (!existingScheduleId) {
+    await stripe.subscriptions.update(subscription.id, {
+      cancel_at_period_end: false,
+      metadata: keepMeta,
+    });
+  }
+
+  let schedule;
+  if (existingScheduleId) {
+    schedule = await stripe.subscriptionSchedules.retrieve(existingScheduleId);
+  } else {
+    schedule = await stripe.subscriptionSchedules.create({
+      from_subscription: subscription.id,
+    });
+  }
+
+  const currentPhase = schedule.phases?.[0];
+  if (!currentPhase) {
+    throw Object.assign(new Error('Subscription schedule has no current phase'), { status: 500 });
+  }
+
+  // Prefer the schedule's own phase end — Stripe rejects mismatched end_date (400).
+  const periodEnd =
+    currentPhase.end_date ||
+    subscriptionPeriodEndUnix(subscription);
+  if (!periodEnd) {
+    throw Object.assign(new Error('Subscription has no period end'), { status: 400 });
+  }
+
+  const currentItems = (currentPhase.items || [])
+    .map((item) => {
+      const price = priceIdOfPhaseItem(item);
+      if (!price) {
+        return null;
+      }
+      return { price, quantity: item.quantity || 1 };
+    })
+    .filter(Boolean);
+
+  if (!currentItems.length) {
+    throw Object.assign(new Error('Subscription schedule phase has no items'), { status: 500 });
+  }
+
+  await stripe.subscriptionSchedules.update(schedule.id, {
+    end_behavior: 'release',
+    metadata: {
+      ...phaseMeta,
+      pending_plan: 'basis',
+    },
+    phases: [
+      {
+        start_date: currentPhase.start_date,
+        end_date: periodEnd,
+        items: currentItems,
+        proration_behavior: 'none',
+        metadata: keepMeta,
+      },
+      {
+        start_date: periodEnd,
+        items: [{ price: basisPriceId, quantity: 1 }],
+        proration_behavior: 'none',
+        metadata: {
+          ...phaseMeta,
+          plan: 'basis',
+          pending_plan: '',
+        },
+      },
+    ],
+  });
+
+  return {
+    scheduleId: schedule.id,
+    periodEndIso: stripeUnixToIso(periodEnd),
+    interval: subscriptionIntervalOf(subscription),
+  };
+}
+
+async function releaseSubscriptionScheduleIfAny(stripe, subscription) {
+  const scheduleId =
+    typeof subscription.schedule === 'string'
+      ? subscription.schedule
+      : subscription.schedule?.id || null;
+  if (!scheduleId) {
+    return;
+  }
+  try {
+    await stripe.subscriptionSchedules.release(scheduleId);
+  } catch (err) {
+    // Already released / completed — ignore.
+    if (err?.code !== 'resource_missing') {
+      console.warn('[billing] schedule release failed', scheduleId, err.message);
+    }
+  }
+}
+
 /**
  * Prefer a configured Stripe Price when its currency matches displayed pricing.
  * Otherwise build price_data so UA sees UAH 399, not a silent EUR 9.99 fallback.
@@ -209,6 +367,33 @@ async function resolvePlanPriceId(stripe, pricing, interval, plan = 'pro') {
   return created.id;
 }
 
+/** GET /api/billing/payment-options — which rail this account must use. */
+router.get('/payment-options', billingAuth, async (req, res, next) => {
+  try {
+    const user = await loadUser(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const plan = req.query?.plan === 'basis' ? 'basis' : 'pro';
+    const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
+    const preferredProvider = paymentProviderForCountry(pricingCountry);
+    const tributeReady = isTributeConfigured();
+    const stripeReady = Boolean(getStripe());
+    const provider = resolvePaymentProvider(pricingCountry, { tributeReady, stripeReady });
+    res.json({
+      country: pricingCountry,
+      preferredProvider,
+      provider,
+      fallbackUsed: preferredProvider === 'tribute' && provider === 'stripe',
+      tributeReady,
+      stripeReady,
+      trialDays: plan === 'pro' ? (provider === 'tribute' ? 7 : PRO_TRIAL_DAYS) : 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /** POST /api/billing/checkout-session — Stripe Checkout (только при настроенном налоговом режиме). */
 router.post('/checkout-session', billingAuth, async (req, res, next) => {
   try {
@@ -229,6 +414,17 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
 
     const stripe = getStripe();
     const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
+    const tributeReady = isTributeConfigured();
+    const provider = resolvePaymentProvider(pricingCountry, {
+      tributeReady,
+      stripeReady: Boolean(stripe),
+    });
+    if (provider !== 'stripe') {
+      return res.status(409).json({
+        message: 'This account must pay with Tribute',
+        provider,
+      });
+    }
     const pricing = getPlanPricing(plan, pricingCountry);
     const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
 
@@ -301,8 +497,88 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
 });
 
 /**
+ * POST /api/billing/tribute/checkout-session — Tribute Shop order (CIS only).
+ */
+router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => {
+  try {
+    const user = await loadUser(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const plan = req.body?.plan === 'basis' ? 'basis' : 'pro';
+    if (!canPurchasePlan(user, plan === 'basis' ? 'basis' : 'trial')) {
+      return res.status(403).json({
+        message:
+          plan === 'basis'
+            ? 'Basis is only available from Free after tax regime is set'
+            : 'Set your tax regime in Account before purchasing a subscription',
+      });
+    }
+
+    const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
+    const tributeReady = isTributeConfigured();
+    const provider = resolvePaymentProvider(pricingCountry, {
+      tributeReady,
+      stripeReady: Boolean(getStripe()),
+    });
+    if (provider !== 'tribute') {
+      return res.status(409).json({
+        message: tributeReady
+          ? 'This account must pay with Stripe'
+          : 'Tribute is not ready yet; use Stripe checkout for now',
+        provider,
+      });
+    }
+
+    if (!tributeReady) {
+      return res.status(503).json({
+        message:
+          'Tribute is not configured yet (TRIBUTE_API_KEY). Add the key and shop webhook, then retry.',
+        provider,
+      });
+    }
+
+    const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
+    const order = await createTributeShopOrder({
+      plan,
+      interval,
+      country: pricingCountry,
+      userId: req.user.id,
+      email: user.email,
+      successUrl: spaPathLink('/app/payment', { billing: 'success' }),
+      failUrl: spaPathLink('/app/payment', { billing: 'cancel' }),
+    });
+
+    await db.collection('users').doc(req.user.id).update({
+      billing_provider: 'tribute',
+      tribute_order_uuid: order?.uuid || user.tribute_order_uuid || null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const url = order?.paymentUrl || order?.webappPaymentUrl || null;
+    if (!url) {
+      return res.status(502).json({
+        message: 'Tribute did not return a payment URL',
+        provider,
+      });
+    }
+
+    res.json({
+      url,
+      provider,
+      plan,
+      trialDays: plan === 'pro' ? 7 : 0,
+      orderUuid: order.uuid || null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /api/billing/change-plan
- * Downgrade Pro/Trial → Basis on the existing Stripe subscription (no new Checkout).
+ * Schedule Pro/Trial → Basis at period end (Pro + Telegram stay until then).
  * Body: { plan: 'basis' }
  */
 router.post('/change-plan', billingAuth, async (req, res, next) => {
@@ -322,11 +598,26 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    if (String(user.billing_provider || '') === 'tribute') {
+      return res.status(400).json({
+        message:
+          'Tribute does not support in-place plan change. Cancel the current plan, then buy Basis from Payment.',
+      });
+    }
+
     const current = subscriptionLabel(user.subscription_status);
     if (current !== 'pro' && current !== 'trial') {
       return res.status(403).json({
         message: 'Basis downgrade is only available from Pro or Trial',
       });
+    }
+
+    if (String(user.pending_plan || '').toLowerCase() === 'basis') {
+      const updated = enrichUserProfile(
+        serializeDoc(await db.collection('users').doc(req.user.id).get()),
+      );
+      const { password_hash: _ph, ...safeUser } = updated;
+      return res.json(safeUser);
     }
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
@@ -342,8 +633,7 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
       return res.status(400).json({ message: 'Subscription has no billable items' });
     }
 
-    const interval =
-      item.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+    const interval = subscriptionIntervalOf(subscription);
     const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
     const pricing = getPlanPricing('basis', pricingCountry);
     const priceId = await resolvePlanPriceId(stripe, pricing, interval, 'basis');
@@ -353,8 +643,7 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
       });
     }
 
-    const meta = {
-      ...(subscription.metadata || {}),
+    const phaseMeta = {
       userId: req.user.id,
       plan: 'basis',
       interval,
@@ -364,29 +653,27 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
       trialDays: '0',
     };
 
-    /** @type {import('stripe').Stripe.SubscriptionUpdateParams} */
-    const updateParams = {
-      items: [{ id: item.id, price: priceId }],
-      proration_behavior: 'create_prorations',
-      cancel_at_period_end: false,
-      metadata: meta,
-    };
-    if (subscription.status === 'trialing') {
-      updateParams.trial_end = 'now';
-    }
-
-    const updatedSub = await stripe.subscriptions.update(subId, updateParams);
+    const scheduled = await scheduleBasisDowngradeAtPeriodEnd(
+      stripe,
+      subscription,
+      priceId,
+      phaseMeta,
+    );
 
     await db.collection('users').doc(req.user.id).update({
       stripe_subscription_id: subId,
       stripe_customer_id:
-        typeof updatedSub.customer === 'string'
-          ? updatedSub.customer
-          : updatedSub.customer?.id || user.stripe_customer_id || null,
-      subscription_status: 'basis',
-      trial_ends_at: null,
+        typeof subscription.customer === 'string'
+          ? subscription.customer
+          : subscription.customer?.id || user.stripe_customer_id || null,
+      // Keep Pro/Trial until period end — Basis applies then via Stripe schedule.
       cancel_at_period_end: false,
       subscription_cancel_at: null,
+      pending_plan: 'basis',
+      pending_plan_at: scheduled.periodEndIso,
+      subscription_current_period_end: scheduled.periodEndIso,
+      subscription_interval: scheduled.interval,
+      stripe_schedule_id: scheduled.scheduleId,
       subscription_updated_at: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -397,6 +684,13 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
     const { password_hash: _ph, ...safeUser } = updated;
     res.json(safeUser);
   } catch (error) {
+    console.error('[billing/change-plan]', {
+      message: error?.message,
+      type: error?.type,
+      code: error?.code,
+      statusCode: error?.statusCode,
+      raw: error?.raw?.message,
+    });
     next(error);
   }
 });
@@ -407,14 +701,37 @@ router.post('/change-plan', billingAuth, async (req, res, next) => {
  */
 router.post('/cancel-subscription', billingAuth, async (req, res, next) => {
   try {
-    const stripe = getStripe();
-    if (!stripe) {
-      return res.status(503).json({ message: 'Stripe is not configured' });
-    }
-
     const user = await loadUser(req.user.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    const tributeUuid = String(user.tribute_order_uuid || '').trim();
+    if (String(user.billing_provider || '') === 'tribute' || tributeUuid) {
+      if (!isTributeConfigured()) {
+        return res.status(503).json({ message: 'Tribute is not configured' });
+      }
+      if (!tributeUuid) {
+        return res.status(400).json({ message: 'No Tribute subscription on this account' });
+      }
+      await cancelTributeShopOrder(tributeUuid);
+      const cancelAt = user.trial_ends_at || user.subscription_cancel_at || null;
+      await db.collection('users').doc(req.user.id).update({
+        cancel_at_period_end: true,
+        subscription_cancel_at: cancelAt,
+        subscription_updated_at: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      const updated = enrichUserProfile(
+        serializeDoc(await db.collection('users').doc(req.user.id).get()),
+      );
+      const { password_hash: _ph, ...safeUser } = updated;
+      return res.json(safeUser);
+    }
+
+    const stripe = getStripe();
+    if (!stripe) {
+      return res.status(503).json({ message: 'Stripe is not configured' });
     }
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
@@ -475,12 +792,23 @@ router.post('/resume-subscription', billingAuth, async (req, res, next) => {
       return res.status(400).json({ message: 'No active Stripe subscription on this account' });
     }
 
-    await stripe.subscriptions.update(subId, { cancel_at_period_end: false });
+    const subscription = await stripe.subscriptions.retrieve(subId);
+    await releaseSubscriptionScheduleIfAny(stripe, subscription);
+
+    const meta = { ...(subscription.metadata || {}) };
+    delete meta.pending_plan;
+    await stripe.subscriptions.update(subId, {
+      cancel_at_period_end: false,
+      metadata: meta,
+    });
 
     await db.collection('users').doc(req.user.id).update({
       stripe_subscription_id: subId,
       cancel_at_period_end: false,
       subscription_cancel_at: null,
+      pending_plan: FieldValue.delete(),
+      pending_plan_at: FieldValue.delete(),
+      stripe_schedule_id: FieldValue.delete(),
       subscription_updated_at: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -518,6 +846,9 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
     const subscription = await stripe.subscriptions.retrieve(subId);
     const status = String(subscription.status || '');
     const planMeta = String(subscription.metadata?.plan || '').trim().toLowerCase();
+    const pendingMeta = String(subscription.metadata?.pending_plan || '').trim().toLowerCase();
+    const periodEndIso = stripeUnixToIso(subscriptionPeriodEndUnix(subscription));
+    const interval = subscriptionIntervalOf(subscription);
 
     const patch = {
       stripe_subscription_id: subscription.id,
@@ -527,6 +858,8 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
       subscription_cancel_at: subscription.cancel_at
         ? new Date(subscription.cancel_at * 1000).toISOString()
         : null,
+      subscription_current_period_end: periodEndIso,
+      subscription_interval: interval,
     };
 
     const customerId =
@@ -550,6 +883,15 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
         message: `Subscription status is ${status}, expected active/trialing`,
         stripe_status: status,
       });
+    }
+
+    if (planMeta === 'basis') {
+      patch.pending_plan = FieldValue.delete();
+      patch.pending_plan_at = FieldValue.delete();
+      patch.stripe_schedule_id = FieldValue.delete();
+    } else if (pendingMeta === 'basis') {
+      patch.pending_plan = 'basis';
+      patch.pending_plan_at = periodEndIso;
     }
 
     // Ensure metadata can resolve webhooks later

@@ -146,6 +146,13 @@ function enrichUserProfile(user) {
     trial_ends_at: user.trial_ends_at ?? null,
     cancel_at_period_end: user.cancel_at_period_end === true,
     subscription_cancel_at: user.subscription_cancel_at ?? null,
+    subscription_current_period_end: user.subscription_current_period_end ?? null,
+    subscription_interval:
+      user.subscription_interval === 'yearly' || user.subscription_interval === 'monthly'
+        ? user.subscription_interval
+        : null,
+    pending_plan: String(user.pending_plan || '').toLowerCase() === 'basis' ? 'basis' : null,
+    pending_plan_at: user.pending_plan_at ?? null,
     has_stripe_subscription: Boolean(user.stripe_subscription_id),
     role: normalizeRole(user.role),
     workspace: normalizeWorkspace(user.workspace),

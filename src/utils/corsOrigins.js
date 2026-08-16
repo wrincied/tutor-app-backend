@@ -78,6 +78,37 @@ function spaDeepLink(pathWithQuery, query) {
   return qs ? `${base}/?${qs}#${path}` : `${base}/#${path}`;
 }
 
+/**
+ * Path-router URL (no hash). Used for Tribute success/fail redirects.
+ * Example: spaPathLink('/payment', { billing: 'success' })
+ * → https://simple4u.at/payment?billing=success
+ */
+function spaPathLink(pathWithQuery, query) {
+  const base = primaryFrontendUrl();
+  let path = String(pathWithQuery || '/');
+  let inlineQuery = '';
+  const qIdx = path.indexOf('?');
+  if (qIdx >= 0) {
+    inlineQuery = path.slice(qIdx + 1);
+    path = path.slice(0, qIdx);
+  }
+  if (!path.startsWith('/')) {
+    path = `/${path}`;
+  }
+
+  const params = new URLSearchParams(inlineQuery);
+  if (query && typeof query === 'object') {
+    for (const [key, value] of Object.entries(query)) {
+      if (value == null || value === '') {
+        continue;
+      }
+      params.set(key, String(value));
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${base}${path}?${qs}` : `${base}${path}`;
+}
+
 function createCorsOptions() {
   const allowed = new Set(parseCorsOrigins());
   return {
@@ -100,5 +131,6 @@ module.exports = {
   parseCorsOrigins,
   primaryFrontendUrl,
   spaDeepLink,
+  spaPathLink,
   createCorsOptions,
 };

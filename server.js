@@ -10,7 +10,9 @@ const app = express();
 
 app.use(cors(createCorsOptions()));
 const billingWebhookRoutes = require('./src/routes/billingWebhook');
+const tributeWebhookRoutes = require('./src/routes/tributeWebhook');
 app.use('/api/billing/webhook', billingWebhookRoutes);
+app.use('/api/billing/tribute-webhook', tributeWebhookRoutes);
 
 app.use(express.json());
 
@@ -49,6 +51,7 @@ app.get('/api/health', async (req, res) => {
     app: { status: 'ok' },
     database: { status: 'error', provider: 'firestore' },
     stripe: { status: 'unconfigured' },
+    tribute: { status: 'unconfigured' },
   };
 
   try {
@@ -86,7 +89,12 @@ app.get('/api/health', async (req, res) => {
     }
   }
 
-  const states = Object.values(services).map((s) => s.status);
+  const tributeKey = String(process.env.TRIBUTE_API_KEY || '').trim();
+  services.tribute = tributeKey
+    ? { status: 'ok', provider: 'tribute' }
+    : { status: 'unconfigured' };
+
+  const states = [services.app.status, services.database.status, services.stripe.status];
   let status = 'ok';
   if (states.every((s) => s === 'ok')) {
     status = 'ok';

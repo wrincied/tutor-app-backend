@@ -115,6 +115,17 @@ async function applySubscriptionToUser(userId, subscription) {
 
   const status = String(subscription?.status || '');
   const planMeta = String(subscription?.metadata?.plan || '').trim().toLowerCase();
+  const pendingMeta = String(subscription?.metadata?.pending_plan || '').trim().toLowerCase();
+  const periodEndIso = subscription?.current_period_end
+    ? new Date(
+        (status === 'trialing' && subscription.trial_end
+          ? subscription.trial_end
+          : subscription.current_period_end) * 1000,
+      ).toISOString()
+    : null;
+  const interval =
+    subscription?.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+
   const patch = {
     subscription_updated_at: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
@@ -122,6 +133,8 @@ async function applySubscriptionToUser(userId, subscription) {
     subscription_cancel_at: subscription.cancel_at
       ? new Date(subscription.cancel_at * 1000).toISOString()
       : null,
+    subscription_current_period_end: periodEndIso,
+    subscription_interval: interval,
   };
 
   const customerId = customerIdOf(subscription);
@@ -147,8 +160,20 @@ async function applySubscriptionToUser(userId, subscription) {
     patch.trial_ends_at = null;
     patch.cancel_at_period_end = false;
     patch.subscription_cancel_at = null;
+    patch.pending_plan = FieldValue.delete();
+    patch.pending_plan_at = FieldValue.delete();
+    patch.stripe_schedule_id = FieldValue.delete();
   }
   // incomplete / past_due: keep ids, don't flip plan yet
+
+  if (planMeta === 'basis') {
+    patch.pending_plan = FieldValue.delete();
+    patch.pending_plan_at = FieldValue.delete();
+    patch.stripe_schedule_id = FieldValue.delete();
+  } else if (pendingMeta === 'basis' && (status === 'active' || status === 'trialing')) {
+    patch.pending_plan = 'basis';
+    patch.pending_plan_at = periodEndIso;
+  }
 
   if (subscription.id) {
     patch.stripe_subscription_id = subscription.id;

@@ -52,17 +52,24 @@ function buildVerificationEmail({ email, link, purgeDays }) {
   return { subject, text, html };
 }
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, replyTo }) {
   const from = process.env.EMAIL_FROM || process.env.SMTP_USER || 'noreply@simple4u.local';
 
   if (!smtpConfigured()) {
-    console.info('[email] SMTP not configured — verification link (dev):');
-    console.info(text);
+    console.info('[email] SMTP not configured — message (dev):');
+    console.info({ to, subject, replyTo, text });
     return { sent: false, devMode: true };
   }
 
   const transport = createTransport();
-  await transport.sendMail({ from, to, subject, text, html });
+  await transport.sendMail({
+    from,
+    to,
+    subject,
+    text,
+    html,
+    ...(replyTo ? { replyTo } : {}),
+  });
   return { sent: true, devMode: false };
 }
 
