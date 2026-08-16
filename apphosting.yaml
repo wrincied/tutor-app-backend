@@ -109,6 +109,21 @@ env:
     availability:
       - RUNTIME
 
+  - variable: STRIPE_PRICE_ID_BASIS
+    secret: STRIPE_PRICE_ID_BASIS
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_BASIS_MONTHLY
+    secret: STRIPE_PRICE_ID_BASIS_MONTHLY
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_BASIS_YEARLY
+    secret: STRIPE_PRICE_ID_BASIS_YEARLY
+    availability:
+      - RUNTIME
+
   - variable: TRIBUTE_API_KEY
     secret: TRIBUTE_API_KEY
     availability:
