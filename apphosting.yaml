@@ -24,7 +24,26 @@ env:
     availability:
       - RUNTIME
 
-  # GitHub Firebase UID(s) allowed for /api/admin (comma-separated).
+  - variable: NODE_ENV
+    secret: NODE_ENV
+    availability:
+      - RUNTIME
+
+  - variable: DB_PROVIDER
+    secret: DB_PROVIDER
+    availability:
+      - RUNTIME
+
+  - variable: FIREBASE_PROJECT_ID
+    secret: FIREBASE_PROJECT_ID
+    availability:
+      - RUNTIME
+
+  - variable: FIREBASE_STORAGE_BUCKET
+    secret: FIREBASE_STORAGE_BUCKET
+    availability:
+      - RUNTIME
+
   - variable: ADMIN_GITHUB_UIDS
     secret: ADMIN_GITHUB_UIDS
     availability:
@@ -65,5 +84,46 @@ env:
     availability:
       - RUNTIME
 
-# Stripe / Tribute / Firebase SA — Firebase Console → App Hosting → Environment
-# (live keys are not in this repo; set STRIPE_* and TRIBUTE_* there).
+  - variable: STRIPE_SECRET_KEY
+    secret: STRIPE_SECRET_KEY
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_WEBHOOK_SECRET
+    secret: STRIPE_WEBHOOK_SECRET
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_PRO
+    secret: STRIPE_PRICE_ID_PRO
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_PRO_YEARLY
+    secret: STRIPE_PRICE_ID_PRO_YEARLY
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_PRO_MONTHLY
+    secret: STRIPE_PRICE_ID_PRO_MONTHLY
+    availability:
+      - RUNTIME
+
+  - variable: TRIBUTE_API_KEY
+    secret: TRIBUTE_API_KEY
+    availability:
+      - RUNTIME
+
+  - variable: BOT_USERNAME
+    secret: BOT_USERNAME
+    availability:
+      - RUNTIME
+
+  - variable: BOT_API_SECRET
+    secret: BOT_API_SECRET
+    availability:
+      - RUNTIME
+
+# Not set from local .env (local-only / placeholders):
+# PORT, FRONTEND_URL (above), JWT_SECRET, TELEGRAM_BOT_TOKEN, BOT_API_URL (localhost)
+# Country-specific STRIPE_PRICE_ID_* — add when created in Live Dashboard.

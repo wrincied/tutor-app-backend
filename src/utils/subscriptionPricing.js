@@ -6,8 +6,8 @@ const PRO_PRICING_BY_COUNTRY = {
   PL: { country: 'PL', currency: 'PLN', monthly: 39, yearly: 390 },
   US: { country: 'US', currency: 'USD', monthly: 11.99, yearly: 119.99 },
   KZ: { country: 'KZ', currency: 'KZT', monthly: 3900, yearly: 39000 },
-  BY: { country: 'BY', currency: 'BYN', monthly: 19.99, yearly: 199.99 },
-  RU: { country: 'RU', currency: 'RUB', monthly: 590, yearly: 5900 },
+  BY: { country: 'BY', currency: 'BYN', monthly: 25.99, yearly: 259.99 },
+  RU: { country: 'RU', currency: 'RUB', monthly: 790, yearly: 7900 },
   UA: { country: 'UA', currency: 'UAH', monthly: 399, yearly: 3990 },
 };
 
@@ -17,8 +17,8 @@ const BASIS_PRICING_BY_COUNTRY = {
   PL: { country: 'PL', currency: 'PLN', monthly: 23, yearly: 230 },
   US: { country: 'US', currency: 'USD', monthly: 6.99, yearly: 69.99 },
   KZ: { country: 'KZ', currency: 'KZT', monthly: 2300, yearly: 23000 },
-  BY: { country: 'BY', currency: 'BYN', monthly: 11.99, yearly: 119.99 },
-  RU: { country: 'RU', currency: 'RUB', monthly: 349, yearly: 3490 },
+  BY: { country: 'BY', currency: 'BYN', monthly: 15.99, yearly: 159.99 },
+  RU: { country: 'RU', currency: 'RUB', monthly: 479, yearly: 4790 },
   UA: { country: 'UA', currency: 'UAH', monthly: 239, yearly: 2390 },
 };
 
