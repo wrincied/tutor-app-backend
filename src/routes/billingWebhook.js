@@ -233,48 +233,44 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
-      const userId = await resolveUserId(stripe, {
-        metadataUserId: session.metadata?.userId,
-        clientReferenceId: session.client_reference_id,
-        customerId: customerIdOf(session),
-        email: session.customer_email || session.customer_details?.email,
-      });
-      if (userId && session.subscription) {
-        const subId =
-          typeof session.subscription === 'string'
-            ? session.subscription
-            : session.subscription.id;
-        const subscription = await stripe.subscriptions.retrieve(subId);
-        await applySubscriptionToUser(userId, subscription);
-      } else if (userId && session.metadata?.plan === 'basis') {
-        await db.collection('users').doc(userId).update({
-          subscription_status: 'basis',
-          trial_ends_at: null,
-          subscription_updated_at: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-        console.log('[billingWebhook] applied basis from checkout metadata', userId);
-      } else if (userId && (session.metadata?.plan === 'trial' || session.metadata?.plan === 'pro')) {
-        const ends = new Date();
-        ends.setUTCDate(ends.getUTCDate() + Number(session.metadata.trialDays || 14));
-        const isTrial = session.metadata?.plan === 'trial' || Number(session.metadata?.trialDays) > 0;
-        await db.collection('users').doc(userId).update({
-          subscription_status: isTrial ? 'trial' : 'pro',
-          trial_ends_at: isTrial ? ends.toISOString() : null,
-          subscription_updated_at: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-        console.log('[billingWebhook] applied', isTrial ? 'trial' : 'pro', 'from checkout metadata', userId);
-      } else if (userId) {
-        await db.collection('users').doc(userId).update({
-          subscription_status: 'pro',
-          trial_ends_at: null,
-          subscription_updated_at: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-        console.log('[billingWebhook] applied pro fallback from checkout', userId);
+      const sessionStatus = String(session.status || '');
+      const paymentStatus = String(session.payment_status || '');
+      // Never grant entitlements from metadata alone (abandoned / incomplete sessions).
+      if (sessionStatus && sessionStatus !== 'complete') {
+        console.warn('[billingWebhook] ignore incomplete checkout session', session.id, sessionStatus);
+      } else if (
+        paymentStatus &&
+        paymentStatus !== 'paid' &&
+        paymentStatus !== 'no_payment_required'
+      ) {
+        console.warn(
+          '[billingWebhook] ignore checkout without successful payment',
+          session.id,
+          paymentStatus,
+        );
       } else {
-        console.warn('[billingWebhook] checkout.session.completed without userId', session.id);
+        const userId = await resolveUserId(stripe, {
+          metadataUserId: session.metadata?.userId,
+          clientReferenceId: session.client_reference_id,
+          customerId: customerIdOf(session),
+          email: session.customer_email || session.customer_details?.email,
+        });
+        if (userId && session.subscription) {
+          const subId =
+            typeof session.subscription === 'string'
+              ? session.subscription
+              : session.subscription.id;
+          const subscription = await stripe.subscriptions.retrieve(subId);
+          await applySubscriptionToUser(userId, subscription);
+        } else if (userId) {
+          console.warn(
+            '[billingWebhook] checkout.session.completed without subscription — skip entitlement',
+            session.id,
+            userId,
+          );
+        } else {
+          console.warn('[billingWebhook] checkout.session.completed without userId', session.id);
+        }
       }
     }
 
