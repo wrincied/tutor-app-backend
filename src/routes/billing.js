@@ -29,7 +29,7 @@ const {
 const router = express.Router();
 
 /** Pro free trial length for Stripe Checkout subscriptions. */
-const PRO_TRIAL_DAYS = 14;
+const PRO_TRIAL_DAYS = 7;
 
 function getStripe() {
   const key = String(process.env.STRIPE_SECRET_KEY || '').trim();

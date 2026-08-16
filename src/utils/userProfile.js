@@ -78,7 +78,7 @@ function canPurchasePlan(user, plan) {
 /** null = unlimited */
 const PLAN_STUDENT_LIMITS = Object.freeze({
   free: 3,
-  basis: 10,
+  basis: 8,
   pro: null,
   trial: null,
 });
