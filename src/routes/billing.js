@@ -459,7 +459,7 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
       client_reference_id: req.user.id,
       line_items: [lineItem],
       managed_payments: { enabled: false },
-      success_url: spaPathLink('/app/home', { billing: 'success' }),
+      success_url: `${spaPathLink('/app/home', { billing: 'success' })}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: spaPathLink('/app/pricing', { billing: 'cancel' }),
       metadata: meta,
     };
@@ -815,6 +815,93 @@ router.post('/resume-subscription', billingAuth, async (req, res, next) => {
       pending_plan_at: FieldValue.delete(),
       stripe_schedule_id: FieldValue.delete(),
       subscription_updated_at: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const updated = enrichUserProfile(serializeDoc(await db.collection('users').doc(req.user.id).get()));
+    const { password_hash: _ph, ...safeUser } = updated;
+    res.json(safeUser);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/billing/confirm-checkout-session
+ * Body: { sessionId: 'cs_...' }
+ * Verifies Stripe Checkout completed for this user before entitlements stick.
+ */
+router.post('/confirm-checkout-session', billingAuth, async (req, res, next) => {
+  try {
+    const stripe = getStripe();
+    if (!stripe) {
+      return res.status(503).json({ message: 'Stripe is not configured' });
+    }
+
+    const sessionId = String(req.body?.sessionId || '').trim();
+    if (!sessionId.startsWith('cs_')) {
+      return res.status(400).json({ message: 'sessionId is required' });
+    }
+
+    const user = await loadUser(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const sessionUserId =
+      String(session.client_reference_id || '').trim() ||
+      String(session.metadata?.userId || '').trim();
+    if (sessionUserId && sessionUserId !== req.user.id) {
+      return res.status(403).json({ message: 'Checkout session does not belong to this user' });
+    }
+
+    const complete =
+      session.status === 'complete' &&
+      (session.payment_status === 'paid' || session.payment_status === 'no_payment_required') &&
+      Boolean(session.subscription);
+
+    if (!complete) {
+      // Ensure abandoned / open sessions cannot leave a Trial flag behind.
+      await db.collection('users').doc(req.user.id).update({
+        subscription_status: 'free',
+        trial_ends_at: null,
+        stripe_subscription_id: FieldValue.delete(),
+        stripe_checkout_session_id: FieldValue.delete(),
+        cancel_at_period_end: false,
+        subscription_cancel_at: null,
+        subscription_current_period_end: null,
+        pending_plan: FieldValue.delete(),
+        pending_plan_at: FieldValue.delete(),
+        stripe_schedule_id: FieldValue.delete(),
+        subscription_updated_at: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      if (session.status === 'open') {
+        try {
+          await stripe.checkout.sessions.expire(sessionId);
+        } catch (err) {
+          console.warn('[billing] expire on confirm failed', sessionId, err.message);
+        }
+      }
+      const updated = enrichUserProfile(serializeDoc(await db.collection('users').doc(req.user.id).get()));
+      const { password_hash: _ph, ...safeUser } = updated;
+      return res.status(409).json({
+        message: 'Checkout was not completed',
+        user: safeUser,
+      });
+    }
+
+    const subId =
+      typeof session.subscription === 'string'
+        ? session.subscription
+        : session.subscription.id;
+    const subscription = await stripe.subscriptions.retrieve(subId);
+    const { applySubscriptionToUser } = require('./billingWebhook');
+    await applySubscriptionToUser(req.user.id, subscription);
+
+    await db.collection('users').doc(req.user.id).update({
+      stripe_checkout_session_id: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
