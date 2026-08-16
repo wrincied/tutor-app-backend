@@ -465,9 +465,28 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
     };
 
     // Reuse Stripe customer so webhooks/sync don't spawn orphan customers per checkout.
+    // Stale IDs happen after test→live key switch or deleted customers.
     const existingCustomerId = String(user.stripe_customer_id || '').trim();
     if (existingCustomerId) {
-      sessionParams.customer = existingCustomerId;
+      try {
+        const customer = await stripe.customers.retrieve(existingCustomerId);
+        if (customer && !customer.deleted) {
+          sessionParams.customer = existingCustomerId;
+        } else {
+          throw Object.assign(new Error('deleted'), { code: 'resource_missing' });
+        }
+      } catch (err) {
+        if (err?.code === 'resource_missing' || err?.raw?.code === 'resource_missing') {
+          console.warn('[billing] stale stripe_customer_id, recreating', existingCustomerId);
+          await db.collection('users').doc(req.user.id).update({
+            stripe_customer_id: FieldValue.delete(),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          sessionParams.customer_email = user.email;
+        } else {
+          throw err;
+        }
+      }
     } else {
       sessionParams.customer_email = user.email;
     }
