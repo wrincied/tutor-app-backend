@@ -1,32 +1,8 @@
 const { db } = require('../firebase');
-
-function parseCsvSet(raw) {
-  return new Set(
-    String(raw || '')
-      .split(',')
-      .map((item) => String(item || '').trim())
-      .filter(Boolean),
-  );
-}
-
-function parseEmailAllowlist() {
-  const raw =
-    process.env.ADMIN_GITHUB_EMAILS ||
-    process.env.ADMIN_ALLOWLIST_EMAILS ||
-    process.env.ADMIN_GOOGLE_EMAILS ||
-    '';
-  return new Set(
-    [...parseCsvSet(raw)].map((email) => email.toLowerCase()),
-  );
-}
-
-function parseUidAllowlist() {
-  return parseCsvSet(process.env.ADMIN_GITHUB_UIDS || '');
-}
+const { isAdminAllowlistedEmail } = require('../utils/brandEmail');
 
 /**
- * After auth middleware: GitHub provider + (email allowlist OR uid allowlist) + super_admin.
- * No Firebase email verification / Identity Platform MFA required.
+ * After auth middleware: password provider + admin email allowlist + super_admin.
  */
 async function requireSuperAdmin(req, res, next) {
   try {
@@ -41,28 +17,14 @@ async function requireSuperAdmin(req, res, next) {
       .toLowerCase();
     const provider = String(decoded.firebase?.sign_in_provider || '');
 
-    if (provider !== 'github.com') {
+    if (provider !== 'password') {
       return res.status(403).json({
-        message: 'Admin access requires GitHub sign-in',
-        code: 'GITHUB_REQUIRED',
+        message: 'Admin access requires email/password sign-in',
+        code: 'PASSWORD_REQUIRED',
       });
     }
 
-    const emails = parseEmailAllowlist();
-    const uids = parseUidAllowlist();
-    if (emails.size === 0 && uids.size === 0) {
-      console.error(
-        '[requireSuperAdmin] Set ADMIN_GITHUB_EMAILS and/or ADMIN_GITHUB_UIDS',
-      );
-      return res.status(403).json({
-        message: 'Admin allowlist is not configured',
-        code: 'ALLOWLIST_NOT_CONFIGURED',
-      });
-    }
-
-    const emailOk = email && emails.has(email);
-    const uidOk = uids.has(uid);
-    if (!emailOk && !uidOk) {
+    if (!isAdminAllowlistedEmail(email)) {
       console.warn(
         `[requireSuperAdmin] NOT_ALLOWLISTED uid=${uid} email=${email || '(none)'} provider=${provider}`,
       );

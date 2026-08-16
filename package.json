@@ -10,6 +10,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "reset-password": "node scripts/reset-user-password.js",
+    "ensure-admin": "node scripts/ensure-admin-email-user.js",
     "verify-email": "node scripts/verify-email.js",
     "confirm-subscription": "node scripts/confirm-subscription.js",
     "finance:playground": "node scripts/finance-playground.js",

@@ -1,5 +1,6 @@
 const { admin } = require('../firebase');
 const { isDisposableEmail } = require('../utils/disposableEmailDomain');
+const { isBlockedBrandEmail } = require('../utils/brandEmail');
 
 async function auth(req, res, next) {
   const header = req.headers.authorization;
@@ -15,6 +16,12 @@ async function auth(req, res, next) {
     if (isDisposableEmail(decoded.email)) {
       return res.status(403).json({
         message: 'Disposable email domains are not allowed',
+      });
+    }
+    if (isBlockedBrandEmail(decoded.email)) {
+      return res.status(403).json({
+        message: 'This email is already registered',
+        code: 'BRAND_EMAIL_RESERVED',
       });
     }
     req.authToken = decoded;

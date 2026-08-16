@@ -18,8 +18,26 @@ const {
   normalizeWorkingHours,
   normalizeVacation,
 } = require('../utils/userWorkspaceSettings');
+const { sendPasswordResetForEmail } = require('../services/passwordResetService');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
+
+const passwordResetRate = new Map();
+
+function rateLimitPasswordReset(ip) {
+  const key = String(ip || 'unknown');
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const max = 8;
+  const entry = passwordResetRate.get(key) || { count: 0, start: now };
+  if (now - entry.start > windowMs) {
+    entry.count = 0;
+    entry.start = now;
+  }
+  entry.count += 1;
+  passwordResetRate.set(key, entry);
+  return entry.count <= max;
+}
 
 /**
  * Гарантирует документ users/{uid}. Пишет в Firestore только при создании
@@ -75,6 +93,24 @@ async function ensureTutorUserDoc(req) {
 
   return { userRef, userSnap };
 }
+
+/** Public: password reset email with Simple4U /auth/action link (bypasses Firebase Console action URL). */
+router.post('/password-reset', async (req, res, next) => {
+  try {
+    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress;
+    if (!rateLimitPasswordReset(ip)) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const result = await sendPasswordResetForEmail(email);
+    if (!result.ok && result.reason === 'invalid_email') {
+      return res.status(400).json({ error: 'Invalid email' });
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /** Фиксирует визит пользователя (last_login_at). Вызывается с фронта при входе в /app. */
 router.post('/presence', auth, async (req, res, next) => {

@@ -46,8 +46,8 @@ env:
     availability:
       - RUNTIME
 
-  - variable: ADMIN_GITHUB_UIDS
-    secret: ADMIN_GITHUB_UIDS
+  - variable: ADMIN_EMAILS
+    secret: ADMIN_EMAILS
     availability:
       - RUNTIME
 
