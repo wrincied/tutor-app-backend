@@ -42,7 +42,7 @@ function primaryFrontendUrl() {
   if (process.env.NODE_ENV !== 'production') {
     return 'http://localhost:4200';
   }
-  return 'https://simple4u-64822.web.app';
+  return 'https://simple4u.at';
 }
 
 /**

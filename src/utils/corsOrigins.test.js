@@ -30,9 +30,9 @@ describe('corsOrigins', () => {
   it('uses first FRONTEND_URL entry for redirects', () => {
     const prev = process.env.FRONTEND_URL;
     process.env.FRONTEND_URL =
-      'https://simple4u-64822.web.app,https://tutor-app--tutorassis.europe-west4.hosted.app';
+      'https://simple4u.at,https://tutor-app--tutorassis.europe-west4.hosted.app';
     try {
-      assert.equal(primaryFrontendUrl(), 'https://simple4u-64822.web.app');
+      assert.equal(primaryFrontendUrl(), 'https://simple4u.at');
     } finally {
       if (prev === undefined) {
         delete process.env.FRONTEND_URL;

@@ -15,7 +15,7 @@ const {
   resolvePricingCountry,
   toStripeUnitAmount,
 } = require('../utils/subscriptionPricing');
-const { spaDeepLink, spaPathLink } = require('../utils/corsOrigins');
+const { spaPathLink } = require('../utils/corsOrigins');
 const {
   paymentProviderForCountry,
   resolvePaymentProvider,
@@ -459,8 +459,8 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
       client_reference_id: req.user.id,
       line_items: [lineItem],
       managed_payments: { enabled: false },
-      success_url: spaDeepLink('/app/home', { billing: 'success' }),
-      cancel_url: spaDeepLink('/app/pricing', { billing: 'cancel' }),
+      success_url: spaPathLink('/app/home', { billing: 'success' }),
+      cancel_url: spaPathLink('/app/pricing', { billing: 'cancel' }),
       metadata: meta,
     };
 

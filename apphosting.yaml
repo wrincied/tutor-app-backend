@@ -9,15 +9,17 @@ runConfig:
 
 # Разрешённые фронтенды для CORS (comma-separated).
 env:
+  # First origin = Stripe/email redirects (primary SPA).
   - variable: FRONTEND_URL
     value: >-
-      https://tutor-app--tutorassis.europe-west4.hosted.app,
+      https://simple4u.at,
+      https://www.simple4u.at,
       https://simple4u-64822.web.app,
       https://simple4u-64822.firebaseapp.com,
+      https://tutor-app--tutorassis.europe-west4.hosted.app,
       https://tutorassis.web.app,
       https://tutorassis.firebaseapp.com,
       https://wrincied.github.io,
-      https://simple4u.at,
       http://localhost:4200,
       http://localhost:4300,
       http://localhost:4400
