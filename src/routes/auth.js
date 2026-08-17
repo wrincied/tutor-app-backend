@@ -19,10 +19,12 @@ const {
   normalizeVacation,
 } = require('../utils/userWorkspaceSettings');
 const { sendPasswordResetForEmail } = require('../services/passwordResetService');
+const { sendVerificationEmailForAddress } = require('../services/emailVerificationMail');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
 
 const passwordResetRate = new Map();
+const verificationMailRate = new Map();
 
 function rateLimitPasswordReset(ip) {
   const key = String(ip || 'unknown');
@@ -36,6 +38,21 @@ function rateLimitPasswordReset(ip) {
   }
   entry.count += 1;
   passwordResetRate.set(key, entry);
+  return entry.count <= max;
+}
+
+function rateLimitVerificationMail(uid) {
+  const key = String(uid || 'unknown');
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const max = 5;
+  const entry = verificationMailRate.get(key) || { count: 0, start: now };
+  if (now - entry.start > windowMs) {
+    entry.count = 0;
+    entry.start = now;
+  }
+  entry.count += 1;
+  verificationMailRate.set(key, entry);
   return entry.count <= max;
 }
 
@@ -107,6 +124,32 @@ router.post('/password-reset', async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid email' });
     }
     return res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/** Auth: send email-verification link via Resend (SPA /auth/action). */
+router.post('/send-verification-email', auth, async (req, res, next) => {
+  try {
+    if (!rateLimitVerificationMail(req.user.id)) {
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    if (req.user.email_verified) {
+      return res.json({ ok: true, alreadyVerified: true });
+    }
+    const email = String(req.user.email || '').trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    const result = await sendVerificationEmailForAddress(email);
+    if (!result.ok) {
+      if (result.reason === 'user_not_found') {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      return res.status(400).json({ error: 'Could not send verification email' });
+    }
+    return res.json({ ok: true, alreadyVerified: Boolean(result.alreadyVerified) });
   } catch (error) {
     next(error);
   }

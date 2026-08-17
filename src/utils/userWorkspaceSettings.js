@@ -1,5 +1,6 @@
 const WORKSPACE_CURRENCIES = new Set(['EUR', 'USD', 'RUB', 'BYN']);
-const WORKSPACE_DURATIONS = new Set([45, 60, 90, 120]);
+const WORKSPACE_DURATION_MIN = 5;
+const WORKSPACE_DURATION_MAX = 480;
 const DEFAULT_WORKSPACE = {
   name: '',
   currency: 'EUR',
@@ -26,15 +27,20 @@ function parseHourToken(value) {
   return hour >= 0 && hour <= 23 ? hour : null;
 }
 
+function clampLessonDuration(raw) {
+  const minutes = Math.round(Number(raw));
+  if (!Number.isFinite(minutes)) {
+    return DEFAULT_WORKSPACE.defaultLessonDuration;
+  }
+  return Math.min(WORKSPACE_DURATION_MAX, Math.max(WORKSPACE_DURATION_MIN, minutes));
+}
+
 function normalizeWorkspace(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   const currency = WORKSPACE_CURRENCIES.has(data.currency)
     ? data.currency
     : DEFAULT_WORKSPACE.currency;
-  const duration = Number(data.defaultLessonDuration);
-  const defaultLessonDuration = WORKSPACE_DURATIONS.has(duration)
-    ? duration
-    : DEFAULT_WORKSPACE.defaultLessonDuration;
+  const defaultLessonDuration = clampLessonDuration(data.defaultLessonDuration);
 
   return {
     name: String(data.name ?? '').trim().slice(0, 120),

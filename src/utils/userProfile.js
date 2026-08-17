@@ -48,7 +48,9 @@ function assertConfigurableTaxMode(raw) {
 }
 
 function subscriptionLabel(status) {
-  const s = String(status ?? 'free');
+  const s = String(status ?? 'free')
+    .trim()
+    .toLowerCase();
   return ALLOWED_SUBSCRIPTION.has(s) ? s : 'free';
 }
 

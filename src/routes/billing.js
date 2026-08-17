@@ -17,8 +17,12 @@ const {
 } = require('../utils/subscriptionPricing');
 const { spaPathLink } = require('../utils/corsOrigins');
 const {
+  allowedPaymentProviders,
+  isPaymentProviderAllowed,
   paymentProviderForCountry,
+  paymentRailForCountry,
   resolvePaymentProvider,
+  tributeCurrencyForCountry,
 } = require('../utils/paymentProvider');
 const {
   isTributeConfigured,
@@ -51,6 +55,17 @@ async function loadUser(userId) {
     return null;
   }
   return serializeDoc(snap);
+}
+
+/** True when the account is tied to Stripe checkout/subscription state (not manual admin grant). */
+function hasStripeBillingArtifacts(user) {
+  return (
+    Boolean(String(user?.stripe_checkout_session_id || '').trim()) ||
+    Boolean(String(user?.stripe_subscription_id || '').trim()) ||
+    String(user?.billing_provider || '')
+      .trim()
+      .toLowerCase() === 'stripe'
+  );
 }
 
 async function resolveStripeSubscriptionId(stripe, user) {
@@ -379,12 +394,20 @@ router.get('/payment-options', billingAuth, async (req, res, next) => {
     const preferredProvider = paymentProviderForCountry(pricingCountry);
     const tributeReady = isTributeConfigured();
     const stripeReady = Boolean(getStripe());
-    const provider = resolvePaymentProvider(pricingCountry, { tributeReady, stripeReady });
+    const readiness = { tributeReady, stripeReady };
+    const allowedProviders = allowedPaymentProviders(pricingCountry, readiness);
+    const provider = resolvePaymentProvider(pricingCountry, readiness);
     res.json({
       country: pricingCountry,
+      rail: paymentRailForCountry(pricingCountry),
       preferredProvider,
       provider,
-      fallbackUsed: preferredProvider === 'tribute' && provider === 'stripe',
+      allowedProviders,
+      choiceAllowed: allowedProviders.length > 1,
+      fallbackUsed:
+        preferredProvider === 'tribute' &&
+        provider === 'stripe' &&
+        !allowedProviders.includes('tribute'),
       tributeReady,
       stripeReady,
       trialDays: plan === 'pro' ? (provider === 'tribute' ? 7 : PRO_TRIAL_DAYS) : 0,
@@ -415,14 +438,12 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
     const stripe = getStripe();
     const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
     const tributeReady = isTributeConfigured();
-    const provider = resolvePaymentProvider(pricingCountry, {
-      tributeReady,
-      stripeReady: Boolean(stripe),
-    });
-    if (provider !== 'stripe') {
+    const readiness = { tributeReady, stripeReady: Boolean(stripe) };
+    if (!isPaymentProviderAllowed(pricingCountry, 'stripe', readiness)) {
       return res.status(409).json({
         message: 'This account must pay with Tribute',
-        provider,
+        provider: resolvePaymentProvider(pricingCountry, readiness),
+        allowedProviders: allowedPaymentProviders(pricingCountry, readiness),
       });
     }
     const pricing = getPlanPricing(plan, pricingCountry);
@@ -542,16 +563,14 @@ router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => 
 
     const pricingCountry = resolvePricingCountry(user.tax_mode, user.country_settings);
     const tributeReady = isTributeConfigured();
-    const provider = resolvePaymentProvider(pricingCountry, {
-      tributeReady,
-      stripeReady: Boolean(getStripe()),
-    });
-    if (provider !== 'tribute') {
+    const readiness = { tributeReady, stripeReady: Boolean(getStripe()) };
+    if (!isPaymentProviderAllowed(pricingCountry, 'tribute', readiness)) {
       return res.status(409).json({
         message: tributeReady
           ? 'This account must pay with Stripe'
           : 'Tribute is not ready yet; use Stripe checkout for now',
-        provider,
+        provider: resolvePaymentProvider(pricingCountry, readiness),
+        allowedProviders: allowedPaymentProviders(pricingCountry, readiness),
       });
     }
 
@@ -559,7 +578,7 @@ router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => 
       return res.status(503).json({
         message:
           'Tribute is not configured yet (TRIBUTE_API_KEY). Add the key and shop webhook, then retry.',
-        provider,
+        provider: 'tribute',
       });
     }
 
@@ -584,13 +603,13 @@ router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => 
     if (!url) {
       return res.status(502).json({
         message: 'Tribute did not return a payment URL',
-        provider,
+        provider: 'tribute',
       });
     }
 
     res.json({
       url,
-      provider,
+      provider: 'tribute',
       plan,
       trialDays: plan === 'pro' ? 7 : 0,
       orderUuid: order.uuid || null,
@@ -882,20 +901,22 @@ router.post('/confirm-checkout-session', billingAuth, async (req, res, next) => 
 
     if (!complete) {
       // Ensure abandoned / open sessions cannot leave a Trial flag behind.
-      await db.collection('users').doc(req.user.id).update({
-        subscription_status: 'free',
-        trial_ends_at: null,
-        stripe_subscription_id: FieldValue.delete(),
-        stripe_checkout_session_id: FieldValue.delete(),
-        cancel_at_period_end: false,
-        subscription_cancel_at: null,
-        subscription_current_period_end: null,
-        pending_plan: FieldValue.delete(),
-        pending_plan_at: FieldValue.delete(),
-        stripe_schedule_id: FieldValue.delete(),
-        subscription_updated_at: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      });
+      if (hasStripeBillingArtifacts(user) || String(user.billing_provider || '') === 'stripe') {
+        await db.collection('users').doc(req.user.id).update({
+          subscription_status: 'free',
+          trial_ends_at: null,
+          stripe_subscription_id: FieldValue.delete(),
+          stripe_checkout_session_id: FieldValue.delete(),
+          cancel_at_period_end: false,
+          subscription_cancel_at: null,
+          subscription_current_period_end: null,
+          pending_plan: FieldValue.delete(),
+          pending_plan_at: FieldValue.delete(),
+          stripe_schedule_id: FieldValue.delete(),
+          subscription_updated_at: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
       if (session.status === 'open') {
         try {
           await stripe.checkout.sessions.expire(sessionId);
@@ -951,7 +972,14 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
     if (!subId) {
-      // Abandoned / fake Trial: no active Stripe subscription → force Free.
+      // Manual/admin/Tribute grants without Stripe — do not downgrade on sync.
+      if (!hasStripeBillingArtifacts(user)) {
+        const updated = enrichUserProfile(user);
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+
+      // Abandoned Stripe checkout / canceled subscription → force Free.
       const openSessionId = String(user.stripe_checkout_session_id || '').trim();
       if (openSessionId) {
         try {
@@ -961,7 +989,7 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
         }
       }
 
-      const current = String(user.subscription_status || 'free').toLowerCase();
+      const current = subscriptionLabel(user.subscription_status);
       if (current === 'free' && !user.stripe_subscription_id && !user.trial_ends_at) {
         const updated = enrichUserProfile(user);
         const { password_hash: _ph, ...safeUser } = updated;
@@ -1091,6 +1119,9 @@ router.post('/confirm-payment', billingAuth, async (req, res, next) => {
 
     await userRef.update({
       subscription_status: plan,
+      billing_provider: 'admin',
+      stripe_subscription_id: FieldValue.delete(),
+      stripe_checkout_session_id: FieldValue.delete(),
       subscription_updated_at: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });

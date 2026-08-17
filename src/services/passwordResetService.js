@@ -1,16 +1,8 @@
 const { admin } = require('../firebase');
 const { primaryFrontendUrl, spaPathLink } = require('../utils/corsOrigins');
+const { toAppActionLink } = require('../utils/authActionLink');
 const { sendMail } = require('./emailService');
-
-/**
- * Firebase Console blocks custom action URLs (EMAIL_TEMPLATE_UPDATE_NOT_ALLOWED).
- * We generate an oob link with Admin SDK, then rewrite the host/path to our SPA handler.
- */
-function toAppActionLink(firebaseLink) {
-  const parsed = new URL(String(firebaseLink || ''));
-  const base = primaryFrontendUrl().replace(/\/$/, '');
-  return `${base}/auth/action?${parsed.searchParams.toString()}`;
-}
+const { isBlockedBrandEmail } = require('../utils/brandEmail');
 
 function buildPasswordResetEmail({ email, link }) {
   const appName = process.env.APP_NAME || 'Simple4U';
@@ -41,7 +33,6 @@ async function sendPasswordResetForEmail(rawEmail) {
     return { ok: false, reason: 'invalid_email' };
   }
 
-  const { isBlockedBrandEmail } = require('../utils/brandEmail');
   if (isBlockedBrandEmail(email)) {
     return { ok: true };
   }
@@ -62,7 +53,7 @@ async function sendPasswordResetForEmail(rawEmail) {
       url: continueUrl,
       handleCodeInApp: false,
     });
-    const link = toAppActionLink(firebaseLink);
+    const link = toAppActionLink(firebaseLink, primaryFrontendUrl());
     const content = buildPasswordResetEmail({ email, link });
     await sendMail({ to: email, ...content });
   } catch (err) {
@@ -79,5 +70,4 @@ async function sendPasswordResetForEmail(rawEmail) {
 
 module.exports = {
   sendPasswordResetForEmail,
-  toAppActionLink,
 };

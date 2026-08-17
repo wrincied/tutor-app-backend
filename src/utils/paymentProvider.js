@@ -1,9 +1,8 @@
-/** CIS members pay via Tribute. Ukraine is not CIS → Stripe. */
+/** Tribute-only CIS rails. Ukraine is not CIS → Stripe. */
 const CIS_PAYMENT_COUNTRIES = Object.freeze([
   'AM',
   'AZ',
   'BY',
-  'KZ',
   'KG',
   'MD',
   'RU',
@@ -12,7 +11,11 @@ const CIS_PAYMENT_COUNTRIES = Object.freeze([
   'UZ',
 ]);
 
+/** Both Stripe and Tribute offered when ready (user chooses). */
+const MIXED_PAYMENT_COUNTRIES = Object.freeze(['KZ']);
+
 const CIS_SET = new Set(CIS_PAYMENT_COUNTRIES);
+const MIXED_SET = new Set(MIXED_PAYMENT_COUNTRIES);
 
 function normalizePaymentCountry(country) {
   return String(country ?? 'AT')
@@ -24,24 +27,72 @@ function isCisPaymentCountry(country) {
   return CIS_SET.has(normalizePaymentCountry(country));
 }
 
-function paymentProviderForCountry(country) {
-  return isCisPaymentCountry(country) ? 'tribute' : 'stripe';
+function isMixedPaymentCountry(country) {
+  return MIXED_SET.has(normalizePaymentCountry(country));
 }
 
-/**
- * Effective rail: CIS → Tribute when configured, otherwise Stripe fallback.
- */
-function resolvePaymentProvider(country, options = {}) {
-  const preferred = paymentProviderForCountry(country);
-  const tributeReady = options.tributeReady === true;
-  const stripeReady = options.stripeReady !== false;
-  if (preferred === 'tribute' && tributeReady) {
+function paymentRailForCountry(country) {
+  const code = normalizePaymentCountry(country);
+  if (MIXED_SET.has(code)) {
+    return 'mixed';
+  }
+  if (CIS_SET.has(code)) {
     return 'tribute';
   }
-  if (stripeReady) {
-    return 'stripe';
+  return 'stripe';
+}
+
+function paymentProviderForCountry(country) {
+  const rail = paymentRailForCountry(country);
+  if (rail === 'tribute') {
+    return 'tribute';
   }
-  return preferred;
+  return 'stripe';
+}
+
+function allowedPaymentProviders(country, options = {}) {
+  const stripeReady = options.stripeReady !== false;
+  const tributeReady = options.tributeReady === true;
+  const rail = paymentRailForCountry(country);
+
+  if (rail === 'mixed') {
+    const out = [];
+    if (stripeReady) {
+      out.push('stripe');
+    }
+    if (tributeReady) {
+      out.push('tribute');
+    }
+    if (out.length) {
+      return out;
+    }
+    return stripeReady ? ['stripe'] : ['tribute'];
+  }
+
+  if (rail === 'tribute') {
+    if (tributeReady) {
+      return ['tribute'];
+    }
+    if (stripeReady) {
+      return ['stripe'];
+    }
+    return ['tribute'];
+  }
+
+  return stripeReady ? ['stripe'] : [];
+}
+
+function isPaymentProviderAllowed(country, provider, options = {}) {
+  return allowedPaymentProviders(country, options).includes(provider);
+}
+
+function resolvePaymentProvider(country, options = {}) {
+  const allowed = allowedPaymentProviders(country, options);
+  const preferred = paymentProviderForCountry(country);
+  if (allowed.includes(preferred)) {
+    return preferred;
+  }
+  return allowed[0] || preferred;
 }
 
 function tributeCurrencyForCountry(country) {
@@ -50,9 +101,14 @@ function tributeCurrencyForCountry(country) {
 
 module.exports = {
   CIS_PAYMENT_COUNTRIES,
+  MIXED_PAYMENT_COUNTRIES,
   normalizePaymentCountry,
   isCisPaymentCountry,
+  isMixedPaymentCountry,
+  paymentRailForCountry,
   paymentProviderForCountry,
+  allowedPaymentProviders,
+  isPaymentProviderAllowed,
   resolvePaymentProvider,
   tributeCurrencyForCountry,
 };

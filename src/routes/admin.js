@@ -57,6 +57,20 @@ function buildSubscriptionPatch(statusRaw, trialEndsAtRaw) {
     patch.trial_ends_at = FieldValue.delete();
   }
 
+  if (status === 'pro' || status === 'trial' || status === 'basis') {
+    patch.billing_provider = 'admin';
+    patch.stripe_subscription_id = FieldValue.delete();
+    patch.stripe_checkout_session_id = FieldValue.delete();
+    patch.stripe_schedule_id = FieldValue.delete();
+    patch.pending_plan = FieldValue.delete();
+    patch.pending_plan_at = FieldValue.delete();
+    patch.cancel_at_period_end = false;
+    patch.subscription_cancel_at = FieldValue.delete();
+    patch.subscription_current_period_end = FieldValue.delete();
+  } else if (status === 'free') {
+    patch.billing_provider = FieldValue.delete();
+  }
+
   return { ok: true, patch };
 }
 

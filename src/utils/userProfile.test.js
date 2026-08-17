@@ -59,4 +59,9 @@ describe('enrichUserProfile', () => {
     assert.equal(enriched.tax_mode_configured, false);
     assert.equal(enriched.tax_mode, 'none');
   });
+
+  it('normalizes subscription_status casing', () => {
+    const enriched = enrichUserProfile({ subscription_status: 'PRO' });
+    assert.equal(enriched.subscription_status, 'pro');
+  });
 });
