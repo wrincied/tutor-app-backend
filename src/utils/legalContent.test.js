@@ -53,7 +53,7 @@ describe('legalContent sanitize', () => {
     ]) {
       assert.match(body, new RegExp(heading));
     }
-    assert.match(body, /support@simple4u\.com/);
+    assert.match(body, /support@simple4u\.at/);
     assert.match(body, /Arsen Mileuski/);
     assert.match(body, /Köflacher Gasse 9, Tür 218\.2/);
     assert.doesNotMatch(body, /\[Firmenname\]/);
