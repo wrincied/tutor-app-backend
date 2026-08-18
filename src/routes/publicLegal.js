@@ -6,34 +6,22 @@ const {
   defaultLegalDoc,
 } = require('../utils/legalContent');
 const { sendMail } = require('../services/emailService');
+const { contactLimiter, clientIp } = require('../middleware/rateLimit');
 
 const router = express.Router();
-
-const contactRate = new Map();
+const limitContact = contactLimiter();
 
 function contactEmail() {
   const fromEnv = String(process.env.CONTACT_EMAIL || '').trim();
   return fromEnv || 'support@simple4u.at';
 }
 
-function rateLimitContact(ip) {
-  const key = String(ip || 'unknown');
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  const max = 5;
-  const entry = contactRate.get(key) || { count: 0, start: now };
-  if (now - entry.start > windowMs) {
-    entry.count = 0;
-    entry.start = now;
-  }
-  entry.count += 1;
-  contactRate.set(key, entry);
-  return entry.count <= max;
-}
-
 async function verifyRecaptcha(token, ip) {
   const secret = String(process.env.RECAPTCHA_SECRET_KEY || '').trim();
   if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      return { ok: false, skipped: false };
+    }
     return { ok: true, skipped: true };
   }
   if (!token) {
@@ -94,12 +82,9 @@ router.get('/contact', (_req, res) => {
 });
 
 /** POST /api/public/contact — help center form */
-router.post('/contact', async (req, res, next) => {
+router.post('/contact', limitContact, async (req, res, next) => {
   try {
-    const ip = req.headers['x-forwarded-for']?.toString().split(',')[0]?.trim() || req.ip;
-    if (!rateLimitContact(ip)) {
-      return res.status(429).json({ message: 'Too many requests', code: 'RATE_LIMITED' });
-    }
+    const ip = clientIp(req);
 
     const name = String(req.body?.name || '').trim().slice(0, 120);
     const email = String(req.body?.email || '').trim().slice(0, 200);

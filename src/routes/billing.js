@@ -2,6 +2,8 @@ const express = require('express');
 const auth = require('../middleware/auth');
 const requireVerifiedEmail = require('../middleware/requireVerifiedEmail');
 const billingAuth = [auth, requireVerifiedEmail];
+const { checkoutLimiter } = require('../middleware/rateLimit');
+const limitCheckout = checkoutLimiter();
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
 const {
@@ -29,11 +31,38 @@ const {
   createTributeShopOrder,
   cancelTributeShopOrder,
 } = require('../utils/tribute');
+const { checkoutSessionBelongsToUser } = require('../utils/checkoutSessionOwner');
+const { resolveCheckoutOffer } = require('../utils/checkoutOffer');
 
 const router = express.Router();
 
 /** Pro free trial length for Stripe Checkout subscriptions. */
 const PRO_TRIAL_DAYS = 7;
+
+/**
+ * Stripe Checkout URLs die after expiry or completion. A static idempotency
+ * key would keep returning that dead session (German “Sie haben es geschafft”).
+ */
+async function reuseOrExpireCheckoutSession(stripe, sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id.startsWith('cs_')) {
+    return null;
+  }
+  try {
+    const existing = await stripe.checkout.sessions.retrieve(id);
+    if (existing.status === 'open' && existing.url) {
+      return existing;
+    }
+    if (existing.status === 'open') {
+      await stripe.checkout.sessions.expire(id);
+    }
+  } catch (err) {
+    if (err?.code !== 'resource_missing' && err?.raw?.code !== 'resource_missing') {
+      console.warn('[billing] checkout session lookup failed', id, err.message);
+    }
+  }
+  return null;
+}
 
 function getStripe() {
   const key = String(process.env.STRIPE_SECRET_KEY || '').trim();
@@ -291,10 +320,16 @@ async function releaseSubscriptionScheduleIfAny(stripe, subscription) {
  * Prefer a configured Stripe Price when its currency matches displayed pricing.
  * Otherwise build price_data so UA sees UAH 399, not a silent EUR 9.99 fallback.
  */
-async function buildCheckoutLineItem(stripe, pricing, interval, plan = 'pro') {
-  const amount = interval === 'yearly' ? pricing.yearly : pricing.monthly;
+async function buildCheckoutLineItem(stripe, pricing, interval, plan = 'pro', options = {}) {
+  const amount =
+    options.amount != null
+      ? options.amount
+      : interval === 'yearly'
+        ? pricing.yearly
+        : pricing.monthly;
   const currency = String(pricing.currency || 'EUR').toLowerCase();
-  const configuredId = getStripePriceIdForCountry(pricing.country, interval, plan);
+  const configuredId =
+    options.priceId || getStripePriceIdForCountry(pricing.country, interval, plan);
   let productId = null;
 
   if (configuredId) {
@@ -418,7 +453,7 @@ router.get('/payment-options', billingAuth, async (req, res, next) => {
 });
 
 /** POST /api/billing/checkout-session — Stripe Checkout (только при настроенном налоговом режиме). */
-router.post('/checkout-session', billingAuth, async (req, res, next) => {
+router.post('/checkout-session', billingAuth, limitCheckout, async (req, res, next) => {
   try {
     const user = await loadUser(req.user.id);
     if (!user) {
@@ -446,8 +481,9 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
         allowedProviders: allowedPaymentProviders(pricingCountry, readiness),
       });
     }
-    const pricing = getPlanPricing(plan, pricingCountry);
     const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
+    const offer = resolveCheckoutOffer(user, { plan, interval });
+    const pricing = offer.pricing;
 
     if (!stripe) {
       return res.status(503).json({
@@ -456,7 +492,11 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
       });
     }
 
-    const lineItem = await buildCheckoutLineItem(stripe, pricing, interval, plan);
+    const earlyPriceId = String(process.env.STRIPE_PRICE_ID_PRO_EARLY_YEARLY || '').trim();
+    const lineItem = await buildCheckoutLineItem(stripe, pricing, interval, plan, {
+      amount: offer.earlyYearly ? offer.firstChargeMajor : undefined,
+      priceId: offer.earlyYearly ? earlyPriceId || undefined : undefined,
+    });
     if (!lineItem) {
       return res.status(503).json({
         message:
@@ -471,7 +511,9 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
       pricingCountry,
       pricingCurrency: pricing.currency,
       stripeMode: isStripeTestMode() ? 'test' : 'live',
-      trialDays: plan === 'pro' ? String(PRO_TRIAL_DAYS) : '0',
+      trialDays: plan === 'pro' ? String(offer.trialDays) : '0',
+      earlyYearly: offer.earlyYearly ? '1' : '0',
+      referralPercent: String(offer.referralPercent || 0),
     };
 
     /** @type {import('stripe').Stripe.Checkout.SessionCreateParams} */
@@ -523,7 +565,19 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
       };
     }
 
-    const session = await stripe.checkout.sessions.create(sessionParams);
+    const reusable = await reuseOrExpireCheckoutSession(stripe, user.stripe_checkout_session_id);
+    if (reusable) {
+      return res.json({
+        url: reusable.url,
+        pricing,
+        plan,
+        trialDays: plan === 'pro' ? PRO_TRIAL_DAYS : 0,
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams, {
+      idempotencyKey: `checkout:${req.user.id}:${plan}:${interval}:e${offer.earlyYearly ? 1 : 0}:r${offer.referralPercent ? 1 : 0}:${Date.now()}`,
+    });
 
     await db.collection('users').doc(req.user.id).update({
       stripe_checkout_session_id: session.id,
@@ -544,7 +598,7 @@ router.post('/checkout-session', billingAuth, async (req, res, next) => {
 /**
  * POST /api/billing/tribute/checkout-session — Tribute Shop order (CIS only).
  */
-router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => {
+router.post('/tribute/checkout-session', billingAuth, limitCheckout, async (req, res, next) => {
   try {
     const user = await loadUser(req.user.id);
     if (!user) {
@@ -583,6 +637,7 @@ router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => 
     }
 
     const interval = req.body?.interval === 'yearly' ? 'yearly' : 'monthly';
+    const offer = resolveCheckoutOffer(user, { plan, interval });
     const order = await createTributeShopOrder({
       plan,
       interval,
@@ -591,6 +646,7 @@ router.post('/tribute/checkout-session', billingAuth, async (req, res, next) => 
       email: user.email,
       successUrl: spaPathLink('/app/payment', { billing: 'success' }),
       failUrl: spaPathLink('/app/payment', { billing: 'cancel' }),
+      offer,
     });
 
     await db.collection('users').doc(req.user.id).update({
@@ -784,6 +840,10 @@ router.post('/cancel-subscription', billingAuth, async (req, res, next) => {
       });
     }
 
+    const current = await stripe.subscriptions.retrieve(subId);
+    // Early-adopter yearly (and Basis downgrade) wrap the sub in a schedule.
+    // Stripe then rejects subscriptions.update({ cancel_at_period_end }).
+    await releaseSubscriptionScheduleIfAny(stripe, current);
     const subscription = await stripe.subscriptions.update(subId, {
       cancel_at_period_end: true,
     });
@@ -802,6 +862,9 @@ router.post('/cancel-subscription', billingAuth, async (req, res, next) => {
           : subscription.customer?.id || user.stripe_customer_id || null,
       cancel_at_period_end: true,
       subscription_cancel_at: cancelAt,
+      stripe_schedule_id: FieldValue.delete(),
+      pending_plan: FieldValue.delete(),
+      pending_plan_at: FieldValue.delete(),
       subscription_updated_at: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
@@ -887,10 +950,7 @@ router.post('/confirm-checkout-session', billingAuth, async (req, res, next) => 
     }
 
     const session = await stripe.checkout.sessions.retrieve(sessionId);
-    const sessionUserId =
-      String(session.client_reference_id || '').trim() ||
-      String(session.metadata?.userId || '').trim();
-    if (sessionUserId && sessionUserId !== req.user.id) {
+    if (!checkoutSessionBelongsToUser(session, req.user.id)) {
       return res.status(403).json({ message: 'Checkout session does not belong to this user' });
     }
 
@@ -1081,52 +1141,6 @@ router.post('/sync-subscription', billingAuth, async (req, res, next) => {
     await db.collection('users').doc(req.user.id).update(patch);
 
     const updated = enrichUserProfile(serializeDoc(await db.collection('users').doc(req.user.id).get()));
-    const { password_hash: _ph, ...safeUser } = updated;
-    res.json(safeUser);
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * POST /api/billing/confirm-payment
- * Ручное подтверждение оплаты (прод: только с BILLING_ADMIN_SECRET).
- * Body: { plan: 'pro' | 'trial', adminSecret: string }
- */
-router.post('/confirm-payment', billingAuth, async (req, res, next) => {
-  try {
-    const adminSecret = process.env.BILLING_ADMIN_SECRET;
-    if (!adminSecret || String(req.body.adminSecret) !== adminSecret) {
-      return res.status(403).json({ message: 'Invalid admin secret' });
-    }
-
-    const plan = subscriptionLabel(req.body.plan);
-    if (plan !== 'pro' && plan !== 'trial') {
-      return res.status(400).json({ message: 'plan must be pro or trial' });
-    }
-
-    const userRef = db.collection('users').doc(req.user.id);
-    const userSnap = await userRef.get();
-    if (!userSnap.exists) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    const user = serializeDoc(userSnap);
-    const { isTaxModeConfigured } = require('../utils/userProfile');
-    if (!isTaxModeConfigured(user.tax_mode)) {
-      return res.status(403).json({ message: 'Tax regime must be configured first' });
-    }
-
-    await userRef.update({
-      subscription_status: plan,
-      billing_provider: 'admin',
-      stripe_subscription_id: FieldValue.delete(),
-      stripe_checkout_session_id: FieldValue.delete(),
-      subscription_updated_at: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-
-    const updated = enrichUserProfile(serializeDoc(await userRef.get()));
     const { password_hash: _ph, ...safeUser } = updated;
     res.json(safeUser);
   } catch (error) {

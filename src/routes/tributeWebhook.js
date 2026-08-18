@@ -1,6 +1,8 @@
 const express = require('express');
 const { db, FieldValue } = require('../firebase');
 const { verifyTributeSignature, isTributeConfigured } = require('../utils/tribute');
+const { beginWebhookEvent, completeWebhookEvent } = require('../utils/webhookEvents');
+const { applyReferralOnFirstPaid } = require('../utils/referralReward');
 
 const router = express.Router();
 
@@ -20,20 +22,30 @@ function extractShopEvent(body) {
   const payload = body?.payload && typeof body.payload === 'object' ? body.payload : body || {};
   const order = payload.order && typeof payload.order === 'object' ? payload.order : payload;
   const name = String(body?.name || body?.event || payload.name || '').toLowerCase();
+  const status = String(order.status || payload.status || '').toLowerCase();
   const comment = parseComment(order.comment || payload.comment);
+  const memberInTrial = order.memberInTrial === true || payload.memberInTrial === true;
+  const paid =
+    status === 'paid' ||
+    name.includes('payment_received') ||
+    name.includes('paymentreceived') ||
+    name.includes('charge_success') ||
+    name.includes('chargesuccess');
   return {
     name,
     uuid: String(order.uuid || payload.uuid || payload.orderUuid || '').trim(),
     customerId: String(
       order.customerId || payload.customerId || comment.userId || '',
     ).trim(),
-    status: String(order.status || payload.status || '').toLowerCase(),
+    status,
     memberStatus: String(order.memberStatus || payload.memberStatus || '').toLowerCase(),
-    memberInTrial: order.memberInTrial === true || payload.memberInTrial === true,
+    memberInTrial,
     memberExpiresAt: order.memberExpiresAt || payload.memberExpiresAt || null,
     memberTrialEndsAt: order.memberTrialEndsAt || payload.memberTrialEndsAt || null,
     plan: comment.plan === 'basis' ? 'basis' : 'pro',
     interval: comment.interval === 'yearly' ? 'yearly' : 'monthly',
+    paid,
+    firstPaid: paid && !memberInTrial,
   };
 }
 
@@ -50,12 +62,7 @@ async function applyTributeToUser(event) {
     return false;
   }
 
-  const paid =
-    event.name.includes('payment_received') ||
-    event.name.includes('paymentreceived') ||
-    event.name.includes('charge_success') ||
-    event.name.includes('chargesuccess') ||
-    event.status === 'paid';
+  const paid = event.paid === true;
   const cancelled =
     event.name.includes('cancel') || event.memberStatus === 'cancelled';
   const refunded = event.name.includes('refund');
@@ -88,6 +95,7 @@ async function applyTributeToUser(event) {
     } else {
       patch.subscription_status = event.plan === 'basis' ? 'basis' : 'pro';
       patch.trial_ends_at = null;
+      patch.proExpiresAt = FieldValue.delete();
     }
     patch.cancel_at_period_end = event.memberStatus === 'cancelled';
     patch.subscription_cancel_at =
@@ -126,8 +134,25 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
       return res.status(400).json({ message: 'Invalid JSON' });
     }
     const event = extractShopEvent(body);
+    const eventKey = [event.name, event.uuid, event.status, event.customerId]
+      .filter(Boolean)
+      .join(':');
     console.log('[tributeWebhook] event', event.name, event.uuid);
+    const claim = await beginWebhookEvent(db, FieldValue, 'tribute', eventKey);
+    if (claim === 'duplicate') {
+      return res.json({ received: true, duplicate: true });
+    }
     await applyTributeToUser(event);
+    if (event.firstPaid && event.customerId) {
+      await applyReferralOnFirstPaid({
+        db,
+        FieldValue,
+        stripe: null,
+        payerUid: event.customerId,
+        amountPaid: 1,
+      });
+    }
+    await completeWebhookEvent(db, FieldValue, 'tribute', eventKey);
     res.json({ received: true });
   } catch (error) {
     console.error('[tributeWebhook] error', error);

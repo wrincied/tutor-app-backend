@@ -12,9 +12,17 @@ const { resolveTutorName } = require('../utils/tutorName');
 
 const ALLOWED_LANG = new Set(['ru', 'en', 'de', 'kz', 'uk', 'by']);
 
+const crypto = require('crypto');
+
 function requireBotSecret(req, res, next) {
-  const secret = req.get('X-Bot-Secret') || '';
-  if (!process.env.BOT_API_SECRET || secret !== process.env.BOT_API_SECRET) {
+  const expected = String(process.env.BOT_API_SECRET || '');
+  const given = String(req.get('X-Bot-Secret') || '');
+  if (!expected) {
+    return res.status(401).json({ message: 'invalid bot secret' });
+  }
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(given, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     return res.status(401).json({ message: 'invalid bot secret' });
   }
   return next();

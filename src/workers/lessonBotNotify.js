@@ -13,11 +13,14 @@ const {
   resolveTutorTimezone,
 } = require('../utils/lessonNotifyTime');
 const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
+const { expireEndedTrials } = require('../utils/trialExpiry');
 
 const REMIND_MINUTES = 30;
 const COMPLETE_BUFFER_MS = 30 * 60 * 1000;
 const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки «за 30 мин»
 const TICK_MS = 60 * 1000;
+const TRIAL_EXPIRY_EVERY_MS = 60 * 60 * 1000;
+let lastTrialExpiryAt = 0;
 
 /** tutorId → subscription status (refreshed per tick). */
 const tutorPlanCache = new Map();
@@ -222,6 +225,14 @@ async function processAutoComplete(now = Date.now()) {
 async function tick() {
   try {
     tutorPlanCache.clear();
+    const now = Date.now();
+    if (now - lastTrialExpiryAt >= TRIAL_EXPIRY_EVERY_MS) {
+      lastTrialExpiryAt = now;
+      const expired = await expireEndedTrials(db, FieldValue);
+      if (expired > 0) {
+        console.log(`[lessonBotNotify] expired ${expired} admin trial(s)`);
+      }
+    }
     const reminded = await processReminders();
     const done = await processAutoComplete();
     if (reminded || done) {

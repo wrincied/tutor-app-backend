@@ -156,6 +156,17 @@ function enrichUserProfile(user) {
     pending_plan: String(user.pending_plan || '').toLowerCase() === 'basis' ? 'basis' : null,
     pending_plan_at: user.pending_plan_at ?? null,
     has_stripe_subscription: Boolean(user.stripe_subscription_id),
+    isEarlyAdopter: user.isEarlyAdopter === true,
+    proExpiresAt: user.proExpiresAt ?? null,
+    referralCode: String(user.referralCode || '').trim() || null,
+    referredBy: String(user.referredBy || '').trim() || null,
+    stripe_credit_notice: user.stripe_credit_notice && typeof user.stripe_credit_notice === 'object'
+      ? {
+          amount: Number(user.stripe_credit_notice.amount) || 0,
+          currency: String(user.stripe_credit_notice.currency || 'EUR'),
+          source: String(user.stripe_credit_notice.source || 'referral'),
+        }
+      : null,
     role: normalizeRole(user.role),
     workspace: normalizeWorkspace(user.workspace),
     workingHours: normalizeWorkingHours(user.workingHours),

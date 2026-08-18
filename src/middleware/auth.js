@@ -12,7 +12,7 @@ async function auth(req, res, next) {
   const token = header.split(' ')[1];
 
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await admin.auth().verifyIdToken(token, true);
     if (isDisposableEmail(decoded.email)) {
       return res.status(403).json({
         message: 'Disposable email domains are not allowed',

@@ -1,5 +1,8 @@
 const express = require('express');
 const { db, FieldValue } = require('../firebase');
+const { beginWebhookEvent, completeWebhookEvent } = require('../utils/webhookEvents');
+const { ensureEarlyYearSchedule } = require('../utils/stripeEarlySchedule');
+const { applyReferralOnFirstPaid, clearStripeCreditNotice } = require('../utils/referralReward');
 
 const router = express.Router();
 
@@ -142,6 +145,11 @@ async function applySubscriptionToUser(userId, subscription) {
     patch.stripe_customer_id = customerId;
   }
 
+  if (status === 'trialing' || status === 'active') {
+    patch.proExpiresAt = FieldValue.delete();
+    patch.billing_provider = 'stripe';
+  }
+
   if (status === 'trialing') {
     patch.subscription_status = 'trial';
     patch.trial_ends_at = subscription.trial_end
@@ -213,6 +221,64 @@ async function applySubscriptionEvent(stripe, subscription) {
   return applySubscriptionToUser(userId, subscription);
 }
 
+async function applyReferralCouponToInvoice(stripe, invoice) {
+  const coupon = String(process.env.STRIPE_COUPON_REFERRAL_20 || '').trim();
+  if (!coupon || !invoice?.id) {
+    return;
+  }
+  const due = Number(invoice.amount_due ?? invoice.total ?? 0);
+  if (due <= 0) {
+    return;
+  }
+  if ((invoice.discounts && invoice.discounts.length) || invoice.discount) {
+    return;
+  }
+  const userId = await resolveUserId(stripe, {
+    metadataUserId: invoice.subscription_details?.metadata?.userId || invoice.metadata?.userId,
+    customerId: customerIdOf(invoice),
+    email: invoice.customer_email,
+  });
+  if (!userId) {
+    return;
+  }
+  const userSnap = await db.collection('users').doc(userId).get();
+  const user = userSnap.exists ? userSnap.data() : null;
+  if (!user || user.isEarlyAdopter === true || !String(user.referredBy || '').trim()) {
+    return;
+  }
+  const referralSnap = await db.collection('referrals').doc(userId).get();
+  if (!referralSnap.exists || referralSnap.data()?.status !== 'pending') {
+    return;
+  }
+  try {
+    await stripe.invoices.update(invoice.id, { discounts: [{ coupon }] });
+  } catch (err) {
+    console.warn('[billingWebhook] referral coupon skip', invoice.id, err.message);
+  }
+}
+
+async function rewardReferralFromInvoice(stripe, invoice) {
+  const amountPaid = Number(invoice.amount_paid || 0);
+  const userId = await resolveUserId(stripe, {
+    metadataUserId: invoice.subscription_details?.metadata?.userId || invoice.metadata?.userId,
+    customerId: customerIdOf(invoice),
+    email: invoice.customer_email,
+  });
+  if (!userId) {
+    return;
+  }
+  if (amountPaid > 0) {
+    await clearStripeCreditNotice(db, FieldValue, userId);
+  }
+  await applyReferralOnFirstPaid({
+    db,
+    FieldValue,
+    stripe,
+    payerUid: userId,
+    amountPaid,
+  });
+}
+
 router.post('/', express.raw({ type: 'application/json' }), async (req, res, next) => {
   try {
     const stripe = getStripe();
@@ -230,6 +296,11 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
     }
 
     console.log('[billingWebhook] event', event.type, event.id);
+
+    const claim = await beginWebhookEvent(db, FieldValue, 'stripe', event.id);
+    if (claim === 'duplicate') {
+      return res.json({ received: true, duplicate: true });
+    }
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
@@ -262,6 +333,17 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
               : session.subscription.id;
           const subscription = await stripe.subscriptions.retrieve(subId);
           await applySubscriptionToUser(userId, subscription);
+          try {
+            const scheduleId = await ensureEarlyYearSchedule(stripe, subscription);
+            if (scheduleId) {
+              await db.collection('users').doc(userId).update({
+                stripe_schedule_id: scheduleId,
+                updatedAt: FieldValue.serverTimestamp(),
+              });
+            }
+          } catch (err) {
+            console.warn('[billingWebhook] early schedule failed', subId, err.message);
+          }
         } else if (userId) {
           console.warn(
             '[billingWebhook] checkout.session.completed without subscription — skip entitlement',
@@ -282,6 +364,10 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
       await applySubscriptionEvent(stripe, event.data.object);
     }
 
+    if (event.type === 'invoice.created') {
+      await applyReferralCouponToInvoice(stripe, event.data.object);
+    }
+
     if (event.type === 'invoice.payment_succeeded' || event.type === 'invoice.paid') {
       const invoice = event.data.object;
       const subId = subscriptionIdOf(invoice);
@@ -291,8 +377,10 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res, nex
       } else {
         console.warn('[billingWebhook] invoice without subscription id', invoice.id);
       }
+      await rewardReferralFromInvoice(stripe, invoice);
     }
 
+    await completeWebhookEvent(db, FieldValue, 'stripe', event.id);
     res.json({ received: true });
   } catch (error) {
     console.error('[billingWebhook] error', error);

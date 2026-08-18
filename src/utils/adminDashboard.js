@@ -4,6 +4,54 @@ const { serializeDoc, serializeQuerySnapshot } = require('./serialize');
 
 const MS_DAY = 24 * 60 * 60 * 1000;
 
+const FINANCE_ADOPTION_ACTIONS = new Set([
+  'expense.created',
+  'expense.updated',
+  'expense.deleted',
+  'finance.export',
+  'finance.export_pdf',
+  'student.topup',
+  'student.balance_adjust',
+]);
+
+function isAdminEmail(email) {
+  return /^admin@/i.test(String(email || '').trim());
+}
+
+/**
+ * KPI base: include_in_kpi not false, never admin@…, never unset super_admin.
+ */
+function isIncludedInKpi(data) {
+  if (!data || typeof data !== 'object') {
+    return false;
+  }
+  if (isAdminEmail(data.email)) {
+    return false;
+  }
+  if (data.include_in_kpi === false) {
+    return false;
+  }
+  if (data.include_in_kpi === true) {
+    return true;
+  }
+  return data.role !== 'super_admin';
+}
+
+function expenseTutorId(data) {
+  return String(data?.tutor || data?.tutor_id || '').trim();
+}
+
+function lessonTutorId(data) {
+  return String(data?.tutor || data?.tutorId || data?.tutor_id || '').trim();
+}
+
+function roundTenthPercent(part, whole) {
+  if (!whole) {
+    return 0;
+  }
+  return Math.round((part / whole) * 1000) / 10;
+}
+
 function parseTs(value) {
   if (!value) {
     return 0;
@@ -229,30 +277,38 @@ function buildGeography(userDocs) {
     .slice(0, 10);
 }
 
-async function buildProductUsage(db, userCount, nowMs) {
+async function buildProductUsage(db, userCount, nowMs, includedTutorIds) {
   const since7d = new Date(nowMs - 7 * MS_DAY).toISOString();
+  const allow = includedTutorIds instanceof Set ? includedTutorIds : null;
+  const tutorAllowed = (id) => Boolean(id) && (!allow || allow.has(id));
 
-  const [studentsSnap, lessonsSnap, expensesSnap] = await Promise.all([
+  const [studentsSnap, lessonsSnap, expensesSnap, activitySnap] = await Promise.all([
     db.collection('students').get(),
     db.collection('lessons').get(),
     db.collection('expenses').get(),
+    db.collection('activity_logs').get(),
   ]);
 
   const tutorsWithStudent = new Set();
+  let totalStudents = 0;
   studentsSnap.docs.forEach((doc) => {
     const tutorId = doc.data().tutor_id;
-    if (tutorId) {
-      tutorsWithStudent.add(tutorId);
+    if (!tutorAllowed(tutorId)) {
+      return;
     }
+    totalStudents += 1;
+    tutorsWithStudent.add(tutorId);
   });
 
   const tutorsWithLesson = new Set();
   let lessonsLast7d = 0;
   lessonsSnap.docs.forEach((doc) => {
     const data = doc.data();
-    if (data.tutor) {
-      tutorsWithLesson.add(data.tutor);
+    const tutorId = lessonTutorId(data);
+    if (!tutorAllowed(tutorId)) {
+      return;
     }
+    tutorsWithLesson.add(tutorId);
     const created = parseTs(
       typeof data.createdAt?.toDate === 'function'
         ? data.createdAt.toDate().toISOString()
@@ -263,28 +319,43 @@ async function buildProductUsage(db, userCount, nowMs) {
     }
   });
 
-  const tutorsWithFinance = new Set();
+  const financeCandidates = new Set();
   expensesSnap.docs.forEach((doc) => {
-    const tutorId = doc.data().tutor_id;
-    if (tutorId) {
-      tutorsWithFinance.add(tutorId);
+    const tutorId = expenseTutorId(doc.data());
+    if (tutorAllowed(tutorId)) {
+      financeCandidates.add(tutorId);
+    }
+  });
+  activitySnap.docs.forEach((doc) => {
+    const data = doc.data();
+    if (!FINANCE_ADOPTION_ACTIONS.has(String(data.action || ''))) {
+      return;
+    }
+    const tutorId = String(data.tutor_id || data.tutor || '').trim();
+    if (tutorAllowed(tutorId)) {
+      financeCandidates.add(tutorId);
     }
   });
 
+  const tutorsWithFinance = new Set(
+    [...financeCandidates].filter((id) => tutorsWithLesson.has(id)),
+  );
+
   const avgStudentsPerTutor =
     tutorsWithStudent.size > 0
-      ? Math.round((studentsSnap.size / tutorsWithStudent.size) * 10) / 10
+      ? Math.round((totalStudents / tutorsWithStudent.size) * 10) / 10
       : 0;
 
-  const financeUsersPercent =
-    userCount > 0 ? Math.round((tutorsWithFinance.size / userCount) * 1000) / 10 : 0;
+  const coreUsers = tutorsWithLesson.size;
+  const financeUsers = tutorsWithFinance.size;
 
   return {
     lessonsLast7d,
-    totalStudents: studentsSnap.size,
+    totalStudents,
     avgStudentsPerTutor,
-    tutorsWithFinance: tutorsWithFinance.size,
-    financeUsersPercent,
+    tutorsWithFinance: financeUsers,
+    financeUsersPercent: roundTenthPercent(financeUsers, coreUsers),
+    coreActivationPercent: roundTenthPercent(coreUsers, userCount),
     tutorsWithStudent,
     tutorsWithLesson,
   };
@@ -300,14 +371,27 @@ async function buildAdminDashboard(db, { activityLimit = 40 } = {}) {
     emailById.set(doc.id, String(doc.data().email || '').trim());
   });
 
-  const product = await buildProductUsage(db, userDocs.length, nowMs);
+  const kpiDocs = userDocs.filter((doc) => isIncludedInKpi(doc.data()));
+  const includedTutorIds = new Set(kpiDocs.map((doc) => doc.id));
+  const product = await buildProductUsage(db, kpiDocs.length, nowMs, includedTutorIds);
 
   return {
-    stats: buildStats(userDocs),
-    segments: buildSegments(userDocs, nowMs),
-    funnel: buildFunnel(userDocs, product.tutorsWithStudent, product.tutorsWithLesson, nowMs),
-    alerts: buildAlerts(userDocs, emailById, nowMs),
-    geography: buildGeography(userDocs),
+    stats: buildStats(kpiDocs),
+    segments: buildSegments(kpiDocs, nowMs),
+    funnel: buildFunnel(kpiDocs, product.tutorsWithStudent, product.tutorsWithLesson, nowMs),
+    alerts: buildAlerts(kpiDocs, emailById, nowMs),
+    geography: buildGeography(kpiDocs),
+    kpiCoverage: {
+      included: kpiDocs.length,
+      total: userDocs.length,
+    },
+    activation: {
+      totalKpiUsers: kpiDocs.length,
+      coreUsers: product.tutorsWithLesson.size,
+      corePercent: product.coreActivationPercent,
+      financeUsers: product.tutorsWithFinance,
+      financePercent: product.financeUsersPercent,
+    },
     productUsage: {
       lessonsLast7d: product.lessonsLast7d,
       totalStudents: product.totalStudents,
@@ -326,6 +410,8 @@ const DEFAULT_DASHBOARD_WIDGETS = [
   'kpi-trial-users',
   'kpi-conversion',
   'kpi-mrr',
+  'kpi-core-activation',
+  'kpi-finance-adoption',
   'segments',
   'activation-funnel',
   'alerts',
@@ -346,6 +432,12 @@ function normalizeDashboardWidgets(raw) {
 
 module.exports = {
   buildAdminDashboard,
+  isIncludedInKpi,
+  isAdminEmail,
+  expenseTutorId,
+  lessonTutorId,
+  roundTenthPercent,
+  FINANCE_ADOPTION_ACTIONS,
   DEFAULT_DASHBOARD_WIDGETS,
   ALLOWED_DASHBOARD_WIDGETS,
   normalizeDashboardWidgets,

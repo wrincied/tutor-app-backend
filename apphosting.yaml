@@ -1,7 +1,9 @@
 # Firebase App Hosting — Node.js API (tutor-app-backend)
 # https://tutor-app-backend--tutorassis.europe-west4.hosted.app
 runConfig:
-  minInstances: 0
+  # Keep one warm instance so lesson auto-complete and Telegram reminders
+  # are not delayed by App Hosting scale-to-zero.
+  minInstances: 1
   maxInstances: 10
   concurrency: 80
   cpu: 1
@@ -15,14 +17,7 @@ env:
       https://simple4u.at,
       https://www.simple4u.at,
       https://simple4u-64822.web.app,
-      https://simple4u-64822.firebaseapp.com,
-      https://tutor-app--tutorassis.europe-west4.hosted.app,
-      https://tutorassis.web.app,
-      https://tutorassis.firebaseapp.com,
-      https://wrincied.github.io,
-      http://localhost:4200,
-      http://localhost:4300,
-      http://localhost:4400
+      https://simple4u-64822.firebaseapp.com
     availability:
       - RUNTIME
 
@@ -103,6 +98,16 @@ env:
 
   - variable: STRIPE_PRICE_ID_PRO_YEARLY
     secret: STRIPE_PRICE_ID_PRO_YEARLY
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_PRICE_ID_PRO_EARLY_YEARLY
+    secret: STRIPE_PRICE_ID_PRO_EARLY_YEARLY
+    availability:
+      - RUNTIME
+
+  - variable: STRIPE_COUPON_REFERRAL_20
+    secret: STRIPE_COUPON_REFERRAL_20
     availability:
       - RUNTIME
 

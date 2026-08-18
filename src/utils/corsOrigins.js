@@ -1,18 +1,28 @@
-const DEFAULT_ORIGINS = [
+const DEFAULT_PROD_ORIGINS = [
+  'https://simple4u.at',
+  'https://www.simple4u.at',
+  'https://simple4u-64822.web.app',
+  'https://simple4u-64822.firebaseapp.com',
+];
+const DEFAULT_LOCAL_ORIGINS = [
   'http://localhost:4200',
   'http://localhost:4300',
   'http://localhost:4400',
-  'https://tutor-app--tutorassis.europe-west4.hosted.app',
-  'https://tutorassis.web.app',
-  'https://tutorassis.firebaseapp.com',
-  'https://simple4u-64822.web.app',
-  'https://simple4u-64822.firebaseapp.com',
-  'https://wrincied.github.io',
-  'https://simple4u.at',
-  'https://www.simple4u.at',
 ];
+
+function defaultOrigins() {
+  if (process.env.NODE_ENV === 'production') {
+    return DEFAULT_PROD_ORIGINS;
+  }
+  return [...DEFAULT_LOCAL_ORIGINS, ...DEFAULT_PROD_ORIGINS];
+}
+
 function normalizeOrigin(value) {
   return String(value ?? '').trim().replace(/\/$/, '');
+}
+
+function isLocalOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 }
 
 function parseCorsOrigins() {
@@ -23,7 +33,11 @@ function parseCorsOrigins() {
         .map((item) => normalizeOrigin(item))
         .filter(Boolean)
     : [];
-  return [...new Set([...fromEnv, ...DEFAULT_ORIGINS.map(normalizeOrigin)])];
+  const merged = [...new Set([...fromEnv, ...defaultOrigins().map(normalizeOrigin)])];
+  if (process.env.NODE_ENV === 'production') {
+    return merged.filter((origin) => !isLocalOrigin(origin) && origin !== 'https://wrincied.github.io');
+  }
+  return merged;
 }
 
 /** Primary SPA URL for redirects (Stripe, email links). */

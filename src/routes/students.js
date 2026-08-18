@@ -56,6 +56,14 @@ function normalizeMeetingLink(value) {
   if (trimmed.length > 2000) {
     return undefined;
   }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
   return trimmed;
 }
 
@@ -155,26 +163,16 @@ router.post('/', async (req, res, next) => {
       meeting_link,
     } = req.body;
 
-    const normalizedName = name ? String(name).trim() : '';
+    const normalizedName = name ? String(name).trim().slice(0, 120) : '';
     if (!normalizedName) {
       return res.status(400).json({ message: 'name is required' });
     }
 
     const planStatus = await loadTutorSubscriptionStatus(tutorId);
     const maxStudents = maxStudentsForPlan(planStatus);
-    if (maxStudents !== null) {
-      const countSnap = await db.collection('students').where('tutor_id', '==', tutorId).get();
-      if (countSnap.size >= maxStudents) {
-        return res.status(403).json({
-          code: 'PLAN_STUDENT_LIMIT',
-          message: `Student limit reached for your plan (${maxStudents})`,
-          max_students: maxStudents,
-        });
-      }
-    }
 
     const ratePerHour = Number(rate_per_hour);
-    if (Number.isNaN(ratePerHour) || ratePerHour < 0) {
+    if (Number.isNaN(ratePerHour) || ratePerHour < 0 || ratePerHour > 1_000_000) {
       return res.status(400).json({ message: 'rate_per_hour must be a non-negative number' });
     }
 
@@ -206,24 +204,48 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ message: 'Invalid meeting_link' });
     }
 
-    const createdRef = await db.collection('students').add({
-      tutor_id: tutorId,
-      name: normalizedName,
-      rate_per_hour: ratePerHour,
-      rate_currency: currency,
-      color_hex: studentColor,
-      balance_lessons: initialBalance,
-      billing_type: billingType,
-      rate_unit: rateUnit,
-      credit_limit: initialCreditLimit,
-      unpaid_lessons_count: 0,
-      auto_debit_enabled: true,
-      bot_active: botActive,
-      meeting_link: meetingLink ?? null,
-      timezone: timezone ? String(timezone) : 'Europe/Vienna',
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    const createdRef = db.collection('students').doc();
+    try {
+      await db.runTransaction(async (tx) => {
+        if (maxStudents !== null) {
+          const countSnap = await tx.get(db.collection('students').where('tutor_id', '==', tutorId));
+          if (countSnap.size >= maxStudents) {
+            const err = new Error(`Student limit reached for your plan (${maxStudents})`);
+            err.status = 403;
+            err.code = 'PLAN_STUDENT_LIMIT';
+            err.max_students = maxStudents;
+            throw err;
+          }
+        }
+        tx.set(createdRef, {
+          tutor_id: tutorId,
+          name: normalizedName,
+          rate_per_hour: ratePerHour,
+          rate_currency: currency,
+          color_hex: studentColor,
+          balance_lessons: initialBalance,
+          billing_type: billingType,
+          rate_unit: rateUnit,
+          credit_limit: initialCreditLimit,
+          unpaid_lessons_count: 0,
+          auto_debit_enabled: true,
+          bot_active: botActive,
+          meeting_link: meetingLink ?? null,
+          timezone: timezone ? String(timezone).trim().slice(0, 80) : 'Europe/Vienna',
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      });
+    } catch (error) {
+      if (error?.code === 'PLAN_STUDENT_LIMIT') {
+        return res.status(403).json({
+          code: 'PLAN_STUDENT_LIMIT',
+          message: error.message,
+          max_students: error.max_students,
+        });
+      }
+      throw error;
+    }
 
     if (botActive) {
       const { telegram_link_token } = await ensureTelegramLink(createdRef.id, {
@@ -294,11 +316,15 @@ router.put('/:id', async (req, res, next) => {
     };
 
     if (name !== undefined) {
-      patch.name = String(name).trim();
+      const nextName = String(name).trim().slice(0, 120);
+      if (!nextName) {
+        return res.status(400).json({ message: 'name is required' });
+      }
+      patch.name = nextName;
     }
     if (rate_per_hour !== undefined) {
       const ratePerHour = Number(rate_per_hour);
-      if (Number.isNaN(ratePerHour) || ratePerHour < 0) {
+      if (Number.isNaN(ratePerHour) || ratePerHour < 0 || ratePerHour > 1_000_000) {
         return res.status(400).json({ message: 'rate_per_hour must be a non-negative number' });
       }
       patch.rate_per_hour = ratePerHour;
@@ -307,7 +333,7 @@ router.put('/:id', async (req, res, next) => {
       patch.rate_currency = rate_currency;
     }
     if (timezone !== undefined) {
-      patch.timezone = String(timezone);
+      patch.timezone = String(timezone).trim().slice(0, 80);
     }
     if (auto_debit_enabled !== undefined) {
       patch.auto_debit_enabled = Boolean(auto_debit_enabled);
@@ -325,6 +351,7 @@ router.put('/:id', async (req, res, next) => {
           : normalizeRateUnit(before.rate_unit);
       patch.balance_lessons = parseBalanceAmount(balance_lessons, rateForBalance, 0, {
         allowNegative: true,
+        max: 10_000,
       });
     }
     if (credit_limit !== undefined) {
@@ -488,7 +515,7 @@ router.post('/:id/topup', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
     const lessonsToAdd = Number(req.body.lessons);
-    if (Number.isNaN(lessonsToAdd) || lessonsToAdd <= 0) {
+    if (Number.isNaN(lessonsToAdd) || lessonsToAdd <= 0 || lessonsToAdd > 10_000) {
       return res.status(400).json({ message: 'lessons must be a positive number' });
     }
 

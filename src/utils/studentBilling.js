@@ -43,15 +43,16 @@ function parseNonNegativeInt(raw, fallback = 0) {
  * Top-up / ручной баланс: lesson = целое, hour = дробь (мин. 0.01).
  * allowNegative — для правки уже ушедшего в минус баланса при сохранении ученика.
  */
-function parseBalanceAmount(raw, rateUnit, fallback = 0, { allowNegative = false } = {}) {
+function parseBalanceAmount(raw, rateUnit, fallback = 0, { allowNegative = false, max = 10_000 } = {}) {
   const n = Number(raw);
   if (!Number.isFinite(n) || (!allowNegative && n < 0)) {
     return fallback;
   }
+  const capped = Math.min(n, max);
   if (normalizeRateUnit(rateUnit) === 'lesson') {
-    return Math.round(n);
+    return Math.round(capped);
   }
-  return roundBalanceUnits(n);
+  return roundBalanceUnits(capped);
 }
 
 module.exports = {

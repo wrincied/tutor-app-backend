@@ -112,6 +112,28 @@ async function main() {
     currency: 'eur',
     interval: 'year',
   });
+  const earlyYearly = await ensurePrice({
+    nickname: 'simple4u_pro_early_yearly_eur',
+    unitAmount: 5999,
+    currency: 'eur',
+    interval: 'year',
+  });
+
+  let referralCoupon = null;
+  const coupons = await stripe.coupons.list({ limit: 100 });
+  referralCoupon = coupons.data.find((c) => c.id === 'simple4u_referral_20' || c.name === 'Simple4U referral 20%') || null;
+  if (!referralCoupon) {
+    referralCoupon = await stripe.coupons.create({
+      id: 'simple4u_referral_20',
+      name: 'Simple4U referral 20%',
+      percent_off: 20,
+      duration: 'once',
+      metadata: { app: 'simple4u', kind: 'referral' },
+    });
+    console.log(`✓ Created coupon ${referralCoupon.id}`);
+  } else {
+    console.log(`✓ Reusing coupon ${referralCoupon.id}`);
+  }
 
   const block = [
     '',
@@ -120,6 +142,8 @@ async function main() {
     `STRIPE_PRICE_ID_PRO=${monthly.id}`,
     `STRIPE_PRICE_ID_PRO_MONTHLY=${monthly.id}`,
     `STRIPE_PRICE_ID_PRO_YEARLY=${yearly.id}`,
+    `STRIPE_PRICE_ID_PRO_EARLY_YEARLY=${earlyYearly.id}`,
+    `STRIPE_COUPON_REFERRAL_20=${referralCoupon.id}`,
     '# STRIPE_WEBHOOK_SECRET=whsec_...  # from: stripe listen --forward-to localhost:3001/api/billing/webhook',
     '',
   ].join('\n');
@@ -142,6 +166,8 @@ async function main() {
     upsert('STRIPE_SECRET_KEY', key);
     upsert('STRIPE_PRICE_ID_PRO', monthly.id);
     upsert('STRIPE_PRICE_ID_PRO_YEARLY', yearly.id);
+    upsert('STRIPE_PRICE_ID_PRO_EARLY_YEARLY', earlyYearly.id);
+    upsert('STRIPE_COUPON_REFERRAL_20', referralCoupon.id);
     if (!/^STRIPE_PRICE_ID_PRO_MONTHLY=/m.test(envText)) {
       envText += `\nSTRIPE_PRICE_ID_PRO_MONTHLY=${monthly.id}`;
     } else {

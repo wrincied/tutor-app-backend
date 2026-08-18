@@ -20,41 +20,17 @@ const {
 } = require('../utils/userWorkspaceSettings');
 const { sendPasswordResetForEmail } = require('../services/passwordResetService');
 const { sendVerificationEmailForAddress } = require('../services/emailVerificationMail');
+const { passwordResetLimiter, verificationMailLimiter } = require('../middleware/rateLimit');
+const {
+  allocateReferralCode,
+  attachReferral,
+  referralCodeFromRequest,
+} = require('../utils/referralAttribution');
 
 const DEFAULT_TIMEZONE = 'Europe/Vienna';
-
-const passwordResetRate = new Map();
-const verificationMailRate = new Map();
-
-function rateLimitPasswordReset(ip) {
-  const key = String(ip || 'unknown');
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  const max = 8;
-  const entry = passwordResetRate.get(key) || { count: 0, start: now };
-  if (now - entry.start > windowMs) {
-    entry.count = 0;
-    entry.start = now;
-  }
-  entry.count += 1;
-  passwordResetRate.set(key, entry);
-  return entry.count <= max;
-}
-
-function rateLimitVerificationMail(uid) {
-  const key = String(uid || 'unknown');
-  const now = Date.now();
-  const windowMs = 10 * 60 * 1000;
-  const max = 5;
-  const entry = verificationMailRate.get(key) || { count: 0, start: now };
-  if (now - entry.start > windowMs) {
-    entry.count = 0;
-    entry.start = now;
-  }
-  entry.count += 1;
-  verificationMailRate.set(key, entry);
-  return entry.count <= max;
-}
+const TIMEZONE_RE = /^[A-Za-z0-9_+\-\/]{1,80}$/;
+const limitPasswordReset = passwordResetLimiter();
+const limitVerificationMail = verificationMailLimiter();
 
 /**
  * Гарантирует документ users/{uid}. Пишет в Firestore только при создании
@@ -86,10 +62,12 @@ async function ensureTutorUserDoc(req) {
       onboarding_completed: false,
       data_consent_accepted: null,
       marketing_cookies_accepted: null,
+      isEarlyAdopter: false,
+      referredBy: null,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
-    return { userRef, userSnap: await userRef.get() };
+    return { userRef, userSnap: await userRef.get(), created: true };
   }
 
   const data = userSnap.data() || {};
@@ -105,19 +83,24 @@ async function ensureTutorUserDoc(req) {
   if (Object.keys(patch).length > 0) {
     patch.updatedAt = FieldValue.serverTimestamp();
     await userRef.update(patch);
-    return { userRef, userSnap: await userRef.get() };
+    return { userRef, userSnap: await userRef.get(), created: false };
   }
 
-  return { userRef, userSnap };
+  return { userRef, userSnap, created: false };
+}
+
+async function syncReferralFields(req, userRef, userSnap, created) {
+  await allocateReferralCode(db, FieldValue, userRef, userSnap.data()?.referralCode);
+  const code = referralCodeFromRequest(req);
+  if (created && code) {
+    await attachReferral({ db, FieldValue, refereeUid: req.user.id, code });
+  }
+  return userRef.get();
 }
 
 /** Public: password reset email with Simple4U /auth/action link (bypasses Firebase Console action URL). */
-router.post('/password-reset', async (req, res, next) => {
+router.post('/password-reset', limitPasswordReset, async (req, res, next) => {
   try {
-    const ip = req.ip || req.headers['x-forwarded-for'] || req.socket?.remoteAddress;
-    if (!rateLimitPasswordReset(ip)) {
-      return res.status(429).json({ error: 'Too many requests' });
-    }
     const email = String(req.body?.email || '').trim().toLowerCase();
     const result = await sendPasswordResetForEmail(email);
     if (!result.ok && result.reason === 'invalid_email') {
@@ -130,11 +113,8 @@ router.post('/password-reset', async (req, res, next) => {
 });
 
 /** Auth: send email-verification link via Resend (SPA /auth/action). */
-router.post('/send-verification-email', auth, async (req, res, next) => {
+router.post('/send-verification-email', auth, limitVerificationMail, async (req, res, next) => {
   try {
-    if (!rateLimitVerificationMail(req.user.id)) {
-      return res.status(429).json({ error: 'Too many requests' });
-    }
     if (req.user.email_verified) {
       return res.json({ ok: true, alreadyVerified: true });
     }
@@ -173,8 +153,9 @@ router.post('/presence', auth, async (req, res, next) => {
 /** Создаёт или обновляет профиль репетитора в Firestore (документ id = Firebase UID). */
 router.post('/bootstrap', auth, async (req, res, next) => {
   try {
-    const { userSnap } = await ensureTutorUserDoc(req);
-    const user = enrichUserProfile(serializeDoc(userSnap));
+    const { userRef, userSnap, created } = await ensureTutorUserDoc(req);
+    const fresh = await syncReferralFields(req, userRef, userSnap, created);
+    const user = enrichUserProfile(serializeDoc(fresh));
     const { password_hash: _ph, ...safeUser } = user;
     safeUser.email_verified = req.user.email_verified;
     res.json(safeUser);
@@ -185,8 +166,9 @@ router.post('/bootstrap', auth, async (req, res, next) => {
 
 router.get('/me', auth, async (req, res, next) => {
   try {
-    const { userSnap } = await ensureTutorUserDoc(req);
-    const user = enrichUserProfile(serializeDoc(userSnap));
+    const { userRef, userSnap, created } = await ensureTutorUserDoc(req);
+    const fresh = await syncReferralFields(req, userRef, userSnap, created);
+    const user = enrichUserProfile(serializeDoc(fresh));
     const { password_hash: _passwordHash, ...safeUser } = user;
     safeUser.email_verified = req.user.email_verified;
     res.json(safeUser);
@@ -234,7 +216,11 @@ router.put('/me', auth, async (req, res, next) => {
       }
     }
     if (timezone !== undefined) {
-      patch.timezone = String(timezone);
+      const tz = String(timezone).trim().slice(0, 80);
+      if (!TIMEZONE_RE.test(tz)) {
+        return res.status(400).json({ message: 'Invalid timezone' });
+      }
+      patch.timezone = tz;
     }
     if (workspace !== undefined) {
       patch.workspace = normalizeWorkspace(workspace);

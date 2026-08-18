@@ -8,15 +8,27 @@ const { createCorsOptions, parseCorsOrigins } = require('./src/utils/corsOrigins
 
 const app = express();
 
+app.set('trust proxy', 1);
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  }
+  next();
+});
 app.use(cors(createCorsOptions()));
 const billingWebhookRoutes = require('./src/routes/billingWebhook');
 const tributeWebhookRoutes = require('./src/routes/tributeWebhook');
 app.use('/api/billing/webhook', billingWebhookRoutes);
 app.use('/api/billing/tribute-webhook', tributeWebhookRoutes);
 
-app.use(express.json());
+app.use(express.json({ limit: '200kb' }));
 
-// 4. ОСТАЛЬНЫЕ РОУТЫ
+const { globalApiLimiter, healthLimiter } = require('./src/middleware/rateLimit');
+app.use(globalApiLimiter());
+
 const authRoutes = require('./src/routes/auth');
 const studentRoutes = require('./src/routes/students');
 const lessonRoutes = require('./src/routes/lessons');
@@ -41,11 +53,37 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'tutor-backend' });
 });
 
-/**
- * Aggregated public health for status page.
- * Checks process (always ok if responding), Firestore reachability, Stripe API.
- */
-app.get('/api/health', async (req, res) => {
+const limitHealth = healthLimiter();
+let stripeHealthCache = { at: 0, status: 'unconfigured' };
+
+async function readStripeHealth() {
+  const stripeKey = String(process.env.STRIPE_SECRET_KEY || '').trim();
+  if (!stripeKey || stripeKey === 'your_stripe_secret_key' || !stripeKey.startsWith('sk_')) {
+    return { status: 'unconfigured' };
+  }
+  const now = Date.now();
+  if (now - stripeHealthCache.at < 60_000 && stripeHealthCache.status !== 'unconfigured') {
+    return { status: stripeHealthCache.status };
+  }
+  try {
+    // eslint-disable-next-line global-require
+    const stripe = require('stripe')(stripeKey);
+    await Promise.race([
+      stripe.balance.retrieve(),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Stripe health timeout')), 5000);
+      }),
+    ]);
+    stripeHealthCache = { at: now, status: 'ok' };
+    return { status: 'ok' };
+  } catch (err) {
+    console.error('Health stripe:', err.message);
+    stripeHealthCache = { at: now, status: 'error' };
+    return { status: 'error' };
+  }
+}
+
+app.get('/api/health', limitHealth, async (req, res) => {
   const checkedAt = new Date().toISOString();
   const services = {
     app: { status: 'ok' },
@@ -59,38 +97,11 @@ app.get('/api/health', async (req, res) => {
     services.database = { status: 'ok', provider: 'firestore' };
   } catch (err) {
     console.error('Health database:', err.message);
-    services.database = {
-      status: 'error',
-      provider: 'firestore',
-      detail: err.message,
-    };
+    services.database = { status: 'error', provider: 'firestore' };
   }
 
-  const stripeKey = String(process.env.STRIPE_SECRET_KEY || '').trim();
-  if (!stripeKey || stripeKey === 'your_stripe_secret_key' || !stripeKey.startsWith('sk_')) {
-    services.stripe = { status: 'unconfigured' };
-  } else {
-    try {
-      // eslint-disable-next-line global-require
-      const stripe = require('stripe')(stripeKey);
-      await Promise.race([
-        stripe.balance.retrieve(),
-        new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Stripe health timeout')), 5000);
-        }),
-      ]);
-      services.stripe = {
-        status: 'ok',
-        mode: stripeKey.startsWith('sk_test_') ? 'test' : 'live',
-      };
-    } catch (err) {
-      console.error('Health stripe:', err.message);
-      services.stripe = { status: 'error', detail: err.message };
-    }
-  }
-
-  const tributeKey = String(process.env.TRIBUTE_API_KEY || '').trim();
-  services.tribute = tributeKey
+  services.stripe = await readStripeHealth();
+  services.tribute = String(process.env.TRIBUTE_API_KEY || '').trim()
     ? { status: 'ok', provider: 'tribute' }
     : { status: 'unconfigured' };
 
@@ -104,31 +115,16 @@ app.get('/api/health', async (req, res) => {
     status = 'degraded';
   }
 
-  const httpStatus = status === 'error' ? 503 : 200;
-  res.status(httpStatus).json({ status, checkedAt, services });
+  res.status(status === 'error' ? 503 : 200).json({ status, checkedAt, services });
 });
 
-app.get('/api/health/firestore', async (req, res) => {
+app.get('/api/health/firestore', limitHealth, async (req, res) => {
   try {
     await db.collection('lessons').limit(1).get();
     res.json({ status: 'ok', firestore: 'reachable' });
   } catch (err) {
     console.error('Firestore health:', err.message);
-    res.status(503).json({ status: 'error', firestore: err.message });
-  }
-});
-const auth = require('./src/middleware/auth');
-app.delete('/api/lessons-debug/:id', auth, async (req, res, next) => {
-  try {
-    const lessonRef = db.collection('lessons').doc(req.params.id);
-    const snap = await lessonRef.get();
-    if (!snap.exists || snap.data().tutor !== req.user.id) {
-      return res.status(404).json({ message: 'Lesson not found' });
-    }
-    await lessonRef.delete();
-    res.json({ message: 'Deleted' });
-  } catch (error) {
-    next(error);
+    res.status(503).json({ status: 'error', firestore: 'unreachable' });
   }
 });
 

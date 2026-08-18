@@ -210,6 +210,23 @@ function addIncomeByCurrency(bucket, currency, amount) {
 router.use(auth);
 router.use(requireVerifiedEmail);
 
+router.post('/report-export', requireFinancePlan, async (req, res, next) => {
+  try {
+    const kindRaw = String(req.body?.kind || 'pdf').trim().toLowerCase();
+    const kind = kindRaw === 'excel' || kindRaw === 'csv' ? kindRaw : 'pdf';
+    await writeActivityLog({
+      tutorId: req.user.id,
+      category: 'finance',
+      action: 'finance.export',
+      entityType: 'report',
+      metadata: { kind },
+    });
+    res.json({ ok: true, kind });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/activity-logs', requireFinancePlan, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
@@ -398,11 +415,20 @@ router.delete('/expenses/:id', requireFinancePlan, async (req, res, next) => {
 
 router.get('/summary', async (req, res, next) => {
   try {
+    const homeScope = String(req.query.scope || '').toLowerCase() === 'home';
+    if (!homeScope) {
+      const status = await loadTutorSubscriptionStatus(req.user.id);
+      if (!hasFinanceAccess(status)) {
+        return res.status(403).json({
+          code: 'PLAN_FINANCE_REQUIRED',
+          message: 'Finance module requires Basis or Pro',
+        });
+      }
+    }
+
     const tutorId = req.user.id;
     const from = parseDateQuery(req.query.from);
     const to = parseDateQuery(req.query.to);
-    /** Home: без расходов/налога — меньше чтений и работы на CPU. */
-    const homeScope = String(req.query.scope || '').toLowerCase() === 'home';
 
     // Курсы стартуют параллельно с Firestore (кэш ~1ч — почти мгновенно).
     // Home: не ждём ЦБ — иначе summary упирается в timeout ~12s при недоступном банке.

@@ -1,4 +1,8 @@
-/** Tribute-only CIS rails. Ukraine is not CIS → Stripe. */
+/**
+ * Tribute shop/webhook is not production-complete yet.
+ * CIS rails fall back to Stripe until TRIBUTE_API_KEY is set and the shop is live.
+ * Ukraine is not CIS → Stripe.
+ */
 const CIS_PAYMENT_COUNTRIES = Object.freeze([
   'AM',
   'AZ',

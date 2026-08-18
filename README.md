@@ -32,7 +32,7 @@ All protected resources are **multi-tenant**: every query is scoped to the authe
 | Database | Cloud Firestore (`firebase-admin`) |
 | Auth | Firebase Admin — `verifyIdToken` on `Authorization: Bearer` |
 | Payments | Stripe (Checkout + webhooks) |
-| Email | Nodemailer (verification / transactional) |
+| Email | Resend/SMTP for Firebase verification and password-reset links |
 | Scheduling | `node-cron` — billing worker every 10 minutes |
 | Recurrence | `rrule` (shared semantics with frontend) |
 | Tests | Node.js built-in test runner (`node --test`) |
@@ -111,8 +111,8 @@ backend/
     ├── services/
     │   ├── lessonBilling.js
     │   ├── lessonOccurrence.js
-    │   ├── emailVerificationService.js
-    │   └── emailService.js
+    │   ├── emailVerificationMail.js  # Firebase oob link via Resend/SMTP
+    │   └── emailService.js           # sendMail
     └── utils/
         ├── billingWorker.js      # cron: bill completed lessons
         ├── lessonRecurrence.js
@@ -209,7 +209,7 @@ Public (no auth):
 | GET | `/api/public/legal/:doc` | Published legal markdown |
 | GET | `/api/public/contact` | Kontakt email |
 
-Admin access also requires: GitHub provider, allowlist (`ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS`), and Firestore `role=super_admin`. 2FA is expected on the GitHub account (Firebase Identity Platform MFA is not used). `/app/admin` skips email verification and onboarding.
+Admin access requires: email/password sign-in as `admin@simple4u.at` (or `ADMIN_EMAILS`), and Firestore `role=super_admin`. `/app/admin` skips email verification and onboarding.
 
 ---
 
@@ -234,7 +234,7 @@ Default profile on first bootstrap:
 | Worker | Schedule | Role |
 |--------|----------|------|
 | `billingWorker` | Every 10 minutes | Bill completed lessons after buffer; process recurring occurrences |
-| `emailVerificationWorker` | Every 6 hours (when started) | Purge accounts unverified for 3+ days |
+| `lessonBotNotify` | Hourly | Telegram reminders; expire admin-granted trials |
 
 `billingWorker` is started automatically in `server.js` on listen.
 
@@ -318,7 +318,7 @@ node scripts/set-super-admin.js user@gmail.com
 node scripts/set-super-admin.js SNuaQqiQIvgwKkHyzasv0KhZbAU2
 ```
 
-Set `ADMIN_GITHUB_EMAILS` and/or `ADMIN_GITHUB_UIDS` (use UID when GitHub’s email ≠ your admin contact email). Enable **GitHub** in Firebase Authentication. Sign in at `/admin-login` — keep 2FA on GitHub. No email-verify gate for `/app/admin`.
+Sign in at `/admin-login` with `admin@simple4u.at` and the admin password. Allowlist is `ADMIN_EMAILS` (defaults to `admin@simple4u.at`). No email-verify gate for `/app/admin`.
 
 ---
 
@@ -343,7 +343,7 @@ Set secrets (Stripe, service account, SMTP) in **Firebase Console → App Hostin
 - CORS is restricted to origins listed in `FRONTEND_URL`.
 - Stripe webhook route uses `express.raw()` and is mounted **before** `express.json()`.
 - Tutor data is isolated by `req.user.id` on every query.
-- Super-admin routes require `requireSuperAdmin`: allowlisted email, GitHub provider (`github.com`), and `role === 'super_admin'`.
+- Super-admin routes require `requireSuperAdmin`: allowlisted email, password provider, and `role === 'super_admin'`.
 - Legal CMS bodies are markdown-only (HTML stripped on write).
 - User id path params are validated against a safe Firebase-id pattern.
 

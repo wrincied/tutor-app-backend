@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { getPlanPricing, toStripeUnitAmount } = require('./subscriptionPricing');
 const { tributeCurrencyForCountry } = require('./paymentProvider');
+const { resolveCheckoutOffer, tributePeriodAmounts } = require('./checkoutOffer');
 
 const TRIBUTE_API = 'https://tribute.tg/api/v1';
 const TRIBUTE_PRO_TRIAL = 'seven_days';
@@ -90,8 +91,20 @@ async function createTributeShopOrder({
   email,
   successUrl,
   failUrl,
+  offer: offerArg,
 }) {
-  const { currency, amount } = buildTributeCheckoutAmount(plan, country, interval);
+  const tributeCurrency = tributeCurrencyForCountry(country);
+  const pricingCountry = tributeCurrency === 'rub' ? 'RU' : 'AT';
+  const offer = resolveCheckoutOffer(
+    {
+      tax_mode: pricingCountry === 'RU' ? 'ru-ip' : 'at-self-employed',
+      country_settings: pricingCountry,
+      isEarlyAdopter: offerArg?.earlyYearly === true,
+      referredBy: offerArg?.referralPercent ? 'ref' : null,
+    },
+    { plan, interval },
+  );
+  const { currency, amount, firstPeriodAmount } = tributePeriodAmounts(offer);
   const shopId = getTributeShopId();
   const title = plan === 'basis' ? 'Simple4U Basis' : 'Simple4U Pro';
   const period = interval === 'yearly' ? 'yearly' : 'monthly';
@@ -105,8 +118,18 @@ async function createTributeShopOrder({
     email: email || undefined,
     successUrl,
     failUrl,
-    comment: JSON.stringify({ userId, plan, interval, country }),
+    comment: JSON.stringify({
+      userId,
+      plan,
+      interval,
+      country,
+      earlyYearly: offer.earlyYearly,
+      referralPercent: offer.referralPercent,
+    }),
   };
+  if (firstPeriodAmount != null) {
+    payload.firstPeriodAmount = firstPeriodAmount;
+  }
   if (shopId) {
     payload.shopId = shopId;
   }

@@ -9,6 +9,7 @@ const { enrichUserProfile, subscriptionLabel } = require('../utils/userProfile')
 const { getPlanPricing, getSubscriptionPricing, resolvePricingCountry } = require('../utils/subscriptionPricing');
 const {
   buildAdminDashboard,
+  isIncludedInKpi,
   DEFAULT_DASHBOARD_WIDGETS,
   normalizeDashboardWidgets,
 } = require('../utils/adminDashboard');
@@ -89,6 +90,10 @@ function adminUserRow(doc, studentsCount) {
     onboarding_completed: raw.onboarding_completed === true,
     country_settings: enriched.country_settings,
     role: enriched.role,
+    include_in_kpi: isIncludedInKpi({ ...raw, role: enriched.role }),
+    isEarlyAdopter: raw.isEarlyAdopter === true,
+    proExpiresAt: raw.proExpiresAt ?? null,
+    referralCode: raw.referralCode || null,
   };
   if (studentsCount !== undefined) {
     row.studentsCount = studentsCount;
@@ -194,6 +199,9 @@ router.get('/stats', async (req, res, next) => {
     const estimatedMrr = {};
 
     for (const doc of snap.docs) {
+      if (!isIncludedInKpi(doc.data())) {
+        continue;
+      }
       totalUsers += 1;
       const data = doc.data();
       const status = subscriptionLabel(data.subscription_status);
@@ -308,6 +316,93 @@ router.put('/users/:id/subscription', async (req, res, next) => {
     await userRef.update(built.patch);
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, user: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/users/:id/kpi', async (req, res, next) => {
+  try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
+    const include = req.body?.include_in_kpi;
+    if (include !== true && include !== false) {
+      return res.status(400).json({ message: 'include_in_kpi must be true or false' });
+    }
+    const userRef = db.collection('users').doc(req.params.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    await userRef.update({
+      include_in_kpi: include,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    const updated = adminUserRow(await userRef.get());
+    res.json({ ok: true, user: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/users/:id/early-adopter', async (req, res, next) => {
+  try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
+    const flag = req.body?.isEarlyAdopter;
+    if (flag !== true && flag !== false) {
+      return res.status(400).json({ message: 'isEarlyAdopter must be true or false' });
+    }
+    const userRef = db.collection('users').doc(req.params.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    await userRef.update({
+      isEarlyAdopter: flag,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    const updated = adminUserRow(await userRef.get());
+    res.json({ ok: true, user: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const EARLY_PRO_DAYS = 90;
+
+router.post('/users/:id/grant-early-pro', async (req, res, next) => {
+  try {
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid user id', code: 'INVALID_ID' });
+    }
+    const userRef = db.collection('users').doc(req.params.id);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const ends = new Date();
+    ends.setUTCDate(ends.getUTCDate() + EARLY_PRO_DAYS);
+    ends.setUTCHours(23, 59, 59, 999);
+
+    const data = userSnap.data() || {};
+    const patch = {
+      isEarlyAdopter: true,
+      proExpiresAt: ends.toISOString(),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    if (!String(data.stripe_subscription_id || '').trim()) {
+      const built = buildSubscriptionPatch('pro');
+      Object.assign(patch, built.patch);
+      patch.proExpiresAt = ends.toISOString();
+    }
+
+    await userRef.update(patch);
+    const updated = adminUserRow(await userRef.get());
+    res.json({ ok: true, days: EARLY_PRO_DAYS, user: updated });
   } catch (error) {
     next(error);
   }
