@@ -7,6 +7,7 @@ const {
   notifyHomework,
   notifyBalance,
 } = require('../utils/telegramBot');
+const { normalizeTelegramSettings } = require('../utils/telegramNotificationSettings');
 const { resolveTutorName } = require('../utils/tutorName');
 const {
   formatLessonTimeLabel,
@@ -15,9 +16,8 @@ const {
 const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
 const { expireEndedTrials } = require('../utils/trialExpiry');
 
-const REMIND_MINUTES = 30;
 const COMPLETE_BUFFER_MS = 30 * 60 * 1000;
-const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки «за 30 мин»
+const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки напоминания
 const TICK_MS = 60 * 1000;
 const TRIAL_EXPIRY_EVERY_MS = 60 * 60 * 1000;
 let lastTrialExpiryAt = 0;
@@ -73,7 +73,7 @@ async function canNotifyTutorStudent(tutorId, student) {
 }
 
 /**
- * Напоминание за 30 минут до старта (по абсолютному времени урока;
+ * Напоминание за N минут до старта (N из telegram_notification_settings ученика;
  * подпись времени — в timezone репетитора).
  */
 async function processReminders(now = Date.now()) {
@@ -89,12 +89,23 @@ async function processReminders(now = Date.now()) {
     if (Number.isNaN(start)) {
       continue;
     }
-    const remindAt = start - REMIND_MINUTES * 60 * 1000;
+
+    const student = await loadStudent(lesson.student_id);
+    const settings = normalizeTelegramSettings(student?.telegram_notification_settings);
+    if (!settings.lesson_reminder_enabled) {
+      await doc.ref.update({
+        reminder_sent: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      continue;
+    }
+
+    const remindMinutes = settings.lesson_reminder_offset_minutes;
+    const remindAt = start - remindMinutes * 60 * 1000;
     if (Math.abs(now - remindAt) > REMIND_WINDOW_MS) {
       continue;
     }
 
-    const student = await loadStudent(lesson.student_id);
     if (!(await canNotifyTutorStudent(lesson.tutor, student))) {
       await doc.ref.update({
         reminder_sent: true,
@@ -108,7 +119,7 @@ async function processReminders(now = Date.now()) {
     const meetingLink = student.meeting_link || lesson.meeting_link || null;
     const result = await notifyLessonStart({
       studentId: student._id,
-      minutesBefore: REMIND_MINUTES,
+      minutesBefore: remindMinutes,
       timeLabel: formatLessonTimeLabel(lesson.scheduledAt, tz),
       meetingLink,
       tutorName,
@@ -248,7 +259,7 @@ function startLessonBotNotifyWorker() {
     console.log('[lessonBotNotify] disabled via LESSON_BOT_NOTIFY_DISABLED');
     return null;
   }
-  console.log('[lessonBotNotify] started (every 60s, remind=30m, complete=+30m after end)');
+  console.log('[lessonBotNotify] started (every 60s, remind=per-student offset, complete=+30m after end)');
   void tick();
   return setInterval(() => void tick(), TICK_MS);
 }
@@ -257,5 +268,4 @@ module.exports = {
   startLessonBotNotifyWorker,
   processReminders,
   processAutoComplete,
-  REMIND_MINUTES,
 };

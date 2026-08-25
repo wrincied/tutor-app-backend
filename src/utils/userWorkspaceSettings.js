@@ -1,10 +1,15 @@
 const WORKSPACE_CURRENCIES = new Set(['EUR', 'USD', 'RUB', 'BYN']);
 const WORKSPACE_DURATION_MIN = 5;
 const WORKSPACE_DURATION_MAX = 480;
+const REMINDER_OFFSET_MIN = 5;
+const REMINDER_OFFSET_MAX = 7 * 24 * 60;
+const BUILTIN_REMINDER_OFFSETS = new Set([15, 30, 60, 1440]);
 const DEFAULT_WORKSPACE = {
   name: '',
   currency: 'EUR',
   defaultLessonDuration: 60,
+  roundLessonPrices: false,
+  customReminderOffsets: [],
 };
 const DEFAULT_WORKING_HOURS = {
   start: '08:00',
@@ -35,6 +40,24 @@ function clampLessonDuration(raw) {
   return Math.min(WORKSPACE_DURATION_MAX, Math.max(WORKSPACE_DURATION_MIN, minutes));
 }
 
+function normalizeCustomReminderOffsets(raw) {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const unique = new Set();
+  for (const item of raw) {
+    const n = Math.round(Number(item));
+    if (!Number.isFinite(n) || BUILTIN_REMINDER_OFFSETS.has(n)) {
+      continue;
+    }
+    if (n < REMINDER_OFFSET_MIN || n > REMINDER_OFFSET_MAX) {
+      continue;
+    }
+    unique.add(n);
+  }
+  return [...unique].sort((a, b) => a - b);
+}
+
 function normalizeWorkspace(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   const currency = WORKSPACE_CURRENCIES.has(data.currency)
@@ -46,6 +69,8 @@ function normalizeWorkspace(raw) {
     name: String(data.name ?? '').trim().slice(0, 120),
     currency,
     defaultLessonDuration,
+    roundLessonPrices: data.roundLessonPrices === true,
+    customReminderOffsets: normalizeCustomReminderOffsets(data.customReminderOffsets),
   };
 }
 

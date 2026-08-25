@@ -86,6 +86,24 @@ async function ensureTelegramLink(studentId, { name, botActive, existingToken, t
   return { telegram_link_token: token };
 }
 
+async function ensureParentTelegramLink(studentId, { name, existingToken, tutorId }) {
+  const token = existingToken || newLinkToken();
+  const tutorName = tutorId ? await resolveTutorName(tutorId) : null;
+  // Best-effort bot registration — deep link is still returned even if bot is down.
+  try {
+    await registerStudentLink({
+      studentId: `${studentId}__parent`,
+      linkToken: token,
+      studentName: name ? `Parent · ${name}` : 'Parent',
+      tutorName,
+      botActive: true,
+    });
+  } catch (err) {
+    console.warn('ensureParentTelegramLink: bot register failed', err?.message || err);
+  }
+  return { telegram_parent_link_token: token };
+}
+
 router.use(auth);
 router.use(requireVerifiedEmail);
 
@@ -786,6 +804,77 @@ async function findConflictingTelegramChat(chatId, excludeStudentId) {
   }
   return null;
 }
+
+router.post('/:id/telegram-parent-invite', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    if (!hasTelegramAccess(await loadTutorSubscriptionStatus(tutorId))) {
+      return res.status(403).json({
+        code: 'PLAN_TELEGRAM_REQUIRED',
+        message: 'Telegram bot requires Pro or Trial',
+      });
+    }
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    const { telegram_parent_link_token } = await ensureParentTelegramLink(req.params.id, {
+      name: before.name,
+      existingToken: before.telegram_parent_link_token || null,
+      tutorId,
+    });
+    await studentRef.update({
+      telegram_parent_link_token,
+      is_minor: true,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    res.json(withTelegramDeepLink(serializeDoc(await studentRef.get())));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:id/telegram-parent-disconnect', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    if (!hasTelegramAccess(await loadTutorSubscriptionStatus(tutorId))) {
+      return res.status(403).json({
+        code: 'PLAN_TELEGRAM_REQUIRED',
+        message: 'Telegram bot requires Pro or Trial',
+      });
+    }
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    const settings = normalizeTelegramSettings(before.telegram_notification_settings);
+    const nextTargets = (settings.routing_targets || []).filter((t) => t !== 'parent');
+    const nextSettings = normalizeTelegramSettings({
+      ...settings,
+      routing_targets: nextTargets.length ? nextTargets : ['student'],
+    });
+    const { telegram_parent_link_token } = await ensureParentTelegramLink(req.params.id, {
+      name: before.name,
+      existingToken: null,
+      tutorId,
+    });
+    await studentRef.update({
+      telegram_parent_chat_id: null,
+      telegram_parent_username: null,
+      telegram_parent_linked_at: null,
+      telegram_parent_link_token,
+      telegram_notification_settings: nextSettings,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    res.json(withTelegramDeepLink(serializeDoc(await studentRef.get())));
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.post('/:id/telegram-link-manual', async (req, res, next) => {
   try {

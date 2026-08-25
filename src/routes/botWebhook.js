@@ -36,39 +36,67 @@ router.use(requireBotSecret);
 router.post('/telegram-linked', async (req, res, next) => {
   try {
     const {
-      student_id: studentId,
+      student_id: rawStudentId,
       telegram_user_id: telegramUserId,
       telegram_username: telegramUsername,
       telegram_display_name: telegramDisplayName,
       telegram_chat_id: telegramChatId,
+      role: bodyRole,
     } = req.body || {};
 
-    if (!studentId || !telegramUserId || !telegramChatId) {
+    if (!rawStudentId || !telegramUserId || !telegramChatId) {
       return res.status(400).json({
         message: 'student_id, telegram_user_id and telegram_chat_id are required',
       });
     }
 
-    const studentRef = db.collection('students').doc(String(studentId));
+    const rawId = String(rawStudentId);
+    const isParent =
+      bodyRole === 'parent' || rawId.endsWith('__parent') || rawId.startsWith('parent:');
+    const studentId = isParent
+      ? rawId.replace(/__parent$/, '').replace(/^parent:/, '')
+      : rawId;
+
+    const studentRef = db.collection('students').doc(studentId);
     const snap = await studentRef.get();
     if (!snap.exists) {
       return res.status(404).json({ message: 'Student not found' });
     }
 
-    await studentRef.update({
-      telegram_user_id: String(telegramUserId),
-      telegram_username: telegramUsername ? String(telegramUsername).replace(/^@/, '') : null,
-      telegram_display_name: telegramDisplayName ? String(telegramDisplayName).trim() : null,
-      telegram_chat_id: String(telegramChatId),
-      telegram_linked_at: FieldValue.serverTimestamp(),
-      telegram_unlink_pending: false,
-      telegram_unlinked_username: null,
-      bot_active: true,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    const username = telegramUsername ? String(telegramUsername).replace(/^@/, '') : null;
+    const displayName = telegramDisplayName ? String(telegramDisplayName).trim() : null;
+    const chatId = String(telegramChatId);
+    const userId = String(telegramUserId);
+
+    if (isParent) {
+      await studentRef.update({
+        telegram_parent_chat_id: chatId,
+        telegram_parent_username: username,
+        telegram_parent_linked_at: FieldValue.serverTimestamp(),
+        is_minor: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      await studentRef.update({
+        telegram_user_id: userId,
+        telegram_username: username,
+        telegram_display_name: displayName,
+        telegram_chat_id: chatId,
+        telegram_linked_at: FieldValue.serverTimestamp(),
+        telegram_unlink_pending: false,
+        telegram_unlinked_username: null,
+        bot_active: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
 
     const updated = serializeDoc(await studentRef.get());
-    res.json({ ok: true, student_id: updated._id, bot_lang: updated.bot_lang || 'ru' });
+    res.json({
+      ok: true,
+      student_id: updated._id,
+      role: isParent ? 'parent' : 'student',
+      bot_lang: updated.bot_lang || 'ru',
+    });
   } catch (error) {
     next(error);
   }

@@ -17,4 +17,13 @@ describe('normalizeWorkspace defaultLessonDuration', () => {
     assert.equal(normalizeWorkspace({ defaultLessonDuration: 60 }).defaultLessonDuration, 60);
     assert.equal(normalizeWorkspace({ defaultLessonDuration: 90 }).defaultLessonDuration, 90);
   });
+
+  it('persists roundLessonPrices and customReminderOffsets', () => {
+    const next = normalizeWorkspace({
+      roundLessonPrices: true,
+      customReminderOffsets: [45, 15, 45, 99999],
+    });
+    assert.equal(next.roundLessonPrices, true);
+    assert.deepEqual(next.customReminderOffsets, [45]);
+  });
 });

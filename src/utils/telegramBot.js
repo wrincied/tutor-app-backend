@@ -132,9 +132,13 @@ function withTelegramDeepLink(student) {
     return student;
   }
   const token = student.telegram_link_token;
+  const parentToken = student.telegram_parent_link_token;
   return {
     ...student,
     telegram_deep_link: token ? buildDeepLink(token) : student.telegram_deep_link || null,
+    telegram_parent_deep_link: parentToken
+      ? buildDeepLink(parentToken)
+      : student.telegram_parent_deep_link || null,
   };
 }
 

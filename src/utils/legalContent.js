@@ -1,4 +1,4 @@
-﻿/** Allowed legal CMS document ids (path-safe). */
+/** Allowed legal CMS document ids (path-safe). */
 const LEGAL_DOC_IDS = Object.freeze(['datenschutz', 'impressum']);
 
 /**
