@@ -19,6 +19,7 @@ const {
   setBotActive,
   unlinkStudent,
   notifyPayment,
+  notifyBalance,
   withTelegramDeepLink,
 } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
@@ -451,6 +452,69 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+router.post('/:id/archive', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    if (before.archived_at) {
+      return res.json(withTelegramDeepLink(serializeDoc(studentSnap)));
+    }
+    const archived_at = new Date().toISOString();
+    await studentRef.update({
+      archived_at,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.archived',
+      entityType: 'student',
+      entityId: req.params.id,
+      studentName: before.name ?? null,
+    });
+    const updatedSnap = await studentRef.get();
+    res.json(withTelegramDeepLink(serializeDoc(updatedSnap)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:id/unarchive', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const before = studentSnap.data();
+    if (!before.archived_at) {
+      return res.json(withTelegramDeepLink(serializeDoc(studentSnap)));
+    }
+    await studentRef.update({
+      archived_at: FieldValue.delete(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    await writeActivityLog({
+      tutorId,
+      category: 'students',
+      action: 'student.unarchived',
+      entityType: 'student',
+      entityId: req.params.id,
+      studentName: before.name ?? null,
+    });
+    const updatedSnap = await studentRef.get();
+    res.json(withTelegramDeepLink(serializeDoc(updatedSnap)));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.delete('/:id', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
@@ -728,12 +792,11 @@ router.post('/:id/balance-adjust', async (req, res, next) => {
 
     if (canNotify) {
       try {
-        const unitLabel = rateUnit === 'lesson' ? 'ур.' : 'ч';
-        const amountLabel = `${from} → ${nextBalance} ${unitLabel}`;
-        const notifyResult = await notifyPayment({
+        const notifyResult = await notifyBalance({
           studentId: updated._id,
-          amountLabel,
-          lessonsAdded: nextBalance - from,
+          lessonsLeft: nextBalance,
+          lessonsBefore: from,
+          reason,
           rateUnit,
           tutorName: await resolveTutorName(tutorId),
         });

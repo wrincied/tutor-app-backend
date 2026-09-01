@@ -77,15 +77,27 @@ async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, 
   });
 }
 
-async function notifyBalance({ studentId, lessonsLeft, tutorName, rateUnit }) {
-  return botFetch('/v1/notify/balance', {
-    body: {
-      student_id: studentId,
-      lessons_left: Number(lessonsLeft) || 0,
-      tutor_name: tutorName || null,
-      rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
-    },
-  });
+async function notifyBalance({
+  studentId,
+  lessonsLeft,
+  tutorName,
+  rateUnit,
+  lessonsBefore,
+  reason,
+}) {
+  const body = {
+    student_id: studentId,
+    lessons_left: Number(lessonsLeft) || 0,
+    tutor_name: tutorName || null,
+    rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
+  };
+  if (lessonsBefore !== undefined && lessonsBefore !== null && !Number.isNaN(Number(lessonsBefore))) {
+    body.lessons_before = Number(lessonsBefore);
+  }
+  if (reason) {
+    body.reason = String(reason);
+  }
+  return botFetch('/v1/notify/balance', { body });
 }
 
 async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingLink, tutorName }) {
