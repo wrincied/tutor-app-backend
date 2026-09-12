@@ -1,5 +1,5 @@
 const { db, FieldValue } = require('../firebase');
-const { normalizeBillingType } = require('./studentBilling');
+const { normalizeBillingType, normalizeRateUnit, packageDebitAmount } = require('./studentBilling');
 const { appendStudentBalanceLog } = require('./activityLog');
 const { LESSON_BILLING_BUFFER_MS } = require('./lessonBillingConstants');
 const {
@@ -8,6 +8,7 @@ const {
 } = require('../services/lessonOccurrence');
 
 const BUFFER_MS = LESSON_BILLING_BUFFER_MS;
+const BILLING_TICK_MS = 10 * 60 * 1000;
 
 function completedAtMs(lesson) {
   const raw = lesson.completed_at;
@@ -43,29 +44,50 @@ function filterDueLessons(lessons, now = Date.now()) {
   });
 }
 
-function computeStudentBillingUpdate(student, billingType) {
-  const type = normalizeBillingType(billingType ?? student.billing_type);
+/**
+ * @param {object} student
+ * @param {{ billingType?: string, lessonDuration?: number|string } | string} [opts]
+ */
+function computeStudentBillingUpdate(student, opts = {}) {
+  const billingTypeArg = typeof opts === 'string' ? opts : opts?.billingType;
+  const lessonDuration = typeof opts === 'string' ? undefined : opts?.lessonDuration;
+  const type = normalizeBillingType(billingTypeArg ?? student.billing_type);
+  const rateUnit = normalizeRateUnit(student.rate_unit);
+  const units = packageDebitAmount({ rateUnit, lessonDuration });
 
   if (type === 'package') {
-    const currentBalance = Number(student.balance_lessons) || 0;
+    const currentRaw = Number(student.balance_lessons);
+    const current = Number.isFinite(currentRaw) ? currentRaw : 0;
+    const available = Math.max(0, current);
+    const actualDebit = Math.round(Math.min(units, available) * 100) / 100;
+    const next = Math.round((current - actualDebit) * 100) / 100;
     return {
       billingType: 'package',
-      studentPatch: { balance_lessons: currentBalance - 1 },
-      balanceLog: { amount: -1, reason: 'lesson_completed_delayed' },
-      balanceDebited: true,
+      units,
+      studentPatch: actualDebit > 0 ? { balance_lessons: next } : {},
+      balanceLog: { amount: -actualDebit, reason: 'lesson_completed_delayed' },
+      balanceDebited: actualDebit > 0,
+      balanceUnitsDebited: actualDebit > 0 ? actualDebit : undefined,
     };
   }
 
   const currentUnpaid = Number(student.unpaid_lessons_count) || 0;
   return {
     billingType: 'postpaid',
-    studentPatch: { unpaid_lessons_count: currentUnpaid + 1 },
-    balanceLog: { amount: 1, reason: 'lesson_completed_postpaid' },
+    units,
+    studentPatch: {
+      unpaid_lessons_count: Math.round((currentUnpaid + units) * 100) / 100,
+    },
+    balanceLog: { amount: units, reason: 'lesson_completed_postpaid' },
     balanceDebited: false,
+    balanceUnitsDebited: units,
   };
 }
 
 function appendBalanceLogTx(tx, { tutorId, studentId, studentName, lessonId, amount, reason }) {
+  if (!amount) {
+    return;
+  }
   const logRef = db.collection('balance_logs').doc();
   tx.set(logRef, {
     tutor: tutorId,
@@ -110,12 +132,16 @@ async function processLessonInTransaction(lessonId) {
 
     const student = studentSnap.data();
     const tutorId = lesson.tutor;
-    const billingUpdate = computeStudentBillingUpdate(student);
-
-    tx.update(studentRef, {
-      ...billingUpdate.studentPatch,
-      updatedAt: FieldValue.serverTimestamp(),
+    const billingUpdate = computeStudentBillingUpdate(student, {
+      lessonDuration: lesson.lesson_duration,
     });
+
+    if (Object.keys(billingUpdate.studentPatch).length > 0) {
+      tx.update(studentRef, {
+        ...billingUpdate.studentPatch,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
     appendBalanceLogTx(tx, {
       tutorId,
       studentId,
@@ -126,19 +152,24 @@ async function processLessonInTransaction(lessonId) {
 
     if (
       billingUpdate.billingType === 'package' &&
+      billingUpdate.studentPatch.balance_lessons != null &&
       billingUpdate.studentPatch.balance_lessons <= 1
     ) {
       console.info(
-        `[billingWorker] student ${studentId} has ${billingUpdate.studentPatch.balance_lessons} lesson(s) left on package`,
+        `[billingWorker] student ${studentId} has ${billingUpdate.studentPatch.balance_lessons} unit(s) left on package`,
       );
     }
 
-    tx.update(lessonRef, {
+    const lessonPatch = {
       billing_processed: true,
       billing_processed_at: FieldValue.serverTimestamp(),
       balance_debited: billingUpdate.balanceDebited,
       updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    if (billingUpdate.balanceUnitsDebited != null && billingUpdate.balanceUnitsDebited > 0) {
+      lessonPatch.balance_units_debited = billingUpdate.balanceUnitsDebited;
+    }
+    tx.update(lessonRef, lessonPatch);
   });
 }
 
@@ -151,7 +182,11 @@ function lessonEndMs(lesson) {
   return start + duration * 60_000;
 }
 
-/** Авто-завершение одиночных уроков после окончания времени (без немедленного списания). */
+/**
+ * Legacy path: mark singles completed at lesson end (no immediate debit).
+ * Prefer lessonBotNotify.processAutoComplete (end + 30m → status + debit).
+ * Kept for fallback when LESSON_BOT_NOTIFY_DISABLED=1.
+ */
 async function autoCompletePastSingleLessons(now = Date.now()) {
   const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
   let count = 0;
@@ -178,10 +213,17 @@ async function autoCompletePastSingleLessons(now = Date.now()) {
   return { count };
 }
 
-async function runBillingWorkerCycle() {
+/**
+ * @param {{ autoCompleteSingles?: boolean }} [options]
+ * - autoCompleteSingles=false when lessonBotNotify already completes singles at end+30m
+ */
+async function runBillingWorkerCycle(options = {}) {
+  const autoCompleteSingles = options.autoCompleteSingles !== false;
   const now = Date.now();
 
-  const autoSingle = await autoCompletePastSingleLessons(now);
+  const autoSingle = autoCompleteSingles
+    ? await autoCompletePastSingleLessons(now)
+    : { count: 0 };
   const autoRecurring = await autoCompletePastRecurringOccurrences(now);
   const recurringBilled = await billDueRecurringOccurrences(now);
 
@@ -223,12 +265,39 @@ async function runBillingWorkerCycle() {
   if (parts.length > 0) {
     console.info(`[billingWorker] ${parts.join(', ')}`);
   }
+
+  return {
+    autoSingle: autoSingle.count,
+    autoRecurring: autoRecurring.completed,
+    recurringBilled: recurringBilled.debited,
+    dueBilled: dueLessons.length,
+  };
 }
 
+/**
+ * Fallback scheduler when Telegram/lesson notify worker is disabled.
+ * Normal path: lessonBotNotify tick calls runBillingWorkerCycle({ autoCompleteSingles: false }).
+ */
 function startBillingWorker() {
-  console.info(
-    '[billingWorker] scheduler removed from Express backend. Run billing from Firebase onSchedule.',
-  );
+  if (process.env.BILLING_WORKER_DISABLED === '1') {
+    console.info('[billingWorker] disabled via BILLING_WORKER_DISABLED');
+    return null;
+  }
+  if (process.env.LESSON_BOT_NOTIFY_DISABLED !== '1') {
+    console.info(
+      '[billingWorker] scheduler idle — cycle runs from lessonBotNotify tick (singles at end+30m there)',
+    );
+    return null;
+  }
+  console.info('[billingWorker] started fallback (every 10m, includes single auto-complete at end)');
+  void runBillingWorkerCycle({ autoCompleteSingles: true }).catch((err) => {
+    console.error('[billingWorker] initial cycle failed:', err.message || err);
+  });
+  return setInterval(() => {
+    void runBillingWorkerCycle({ autoCompleteSingles: true }).catch((err) => {
+      console.error('[billingWorker] cycle failed:', err.message || err);
+    });
+  }, BILLING_TICK_MS);
 }
 
 module.exports = {
@@ -236,6 +305,7 @@ module.exports = {
   runBillingWorkerCycle,
   autoCompletePastSingleLessons,
   BUFFER_MS,
+  BILLING_TICK_MS,
   completedAtMs,
   isLessonDueForBilling,
   filterDueLessons,

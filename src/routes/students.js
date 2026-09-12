@@ -25,8 +25,31 @@ const {
 const { resolveTutorName } = require('../utils/tutorName');
 const {
   normalizeTelegramSettings,
-  mapDeliveryError,
+  applyNotifyDeliveryOutcome,
+  shouldPersistDeliveryError,
 } = require('../utils/telegramNotificationSettings');
+
+function hasBlockingDeliveryError(student) {
+  return (
+    student?.telegram_delivery_status === 'error' &&
+    shouldPersistDeliveryError(student.telegram_delivery_error)
+  );
+}
+
+async function clearStaleDeliveryError(studentRef, student) {
+  if (!student?.telegram_user_id && !student?.telegram_chat_id) {
+    return null;
+  }
+  if (student.telegram_delivery_status !== 'error' || hasBlockingDeliveryError(student)) {
+    return null;
+  }
+  await studentRef.update({
+    telegram_delivery_status: 'ok',
+    telegram_delivery_error: null,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  return { telegram_delivery_status: 'ok', telegram_delivery_error: null };
+}
 const {
   maxStudentsForPlan,
   hasTelegramAccess,
@@ -77,13 +100,20 @@ async function ensureTelegramLink(studentId, { name, botActive, existingToken, t
   }
   const token = existingToken || newLinkToken();
   const tutorName = tutorId ? await resolveTutorName(tutorId) : null;
-  await registerStudentLink({
+  const result = await registerStudentLink({
     studentId,
     linkToken: token,
     studentName: name,
     tutorName,
     botActive: true,
   });
+  if (result?.ok === false && !result?.skipped) {
+    console.warn(
+      'ensureTelegramLink: bot register failed',
+      studentId,
+      result?.error || result?.status,
+    );
+  }
   return { telegram_link_token: token };
 }
 
@@ -103,6 +133,43 @@ async function ensureParentTelegramLink(studentId, { name, existingToken, tutorI
     console.warn('ensureParentTelegramLink: bot register failed', err?.message || err);
   }
   return { telegram_parent_link_token: token };
+}
+
+/** Re-register an existing CRM link token with the bot (Firestore bot_bindings). */
+async function syncTelegramLinkToBot(student) {
+  if (!student?.bot_active || !student.telegram_link_token) {
+    return false;
+  }
+  const tutorName = student.tutor_id ? await resolveTutorName(student.tutor_id) : null;
+  const result = await registerStudentLink({
+    studentId: student._id,
+    linkToken: student.telegram_link_token,
+    studentName: student.name,
+    tutorName,
+    botActive: true,
+  });
+  if (result?.ok === false && !result?.skipped) {
+    console.warn(
+      'syncTelegramLinkToBot: bot register failed',
+      student._id,
+      result?.error || result?.status,
+    );
+    return false;
+  }
+  if (
+    result?.ok &&
+    student.telegram_user_id &&
+    student.telegram_delivery_status === 'error' &&
+    !hasBlockingDeliveryError(student)
+  ) {
+    await db.collection('students').doc(student._id).update({
+      telegram_delivery_status: 'ok',
+      telegram_delivery_error: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return true;
+  }
+  return Boolean(result?.ok);
 }
 
 router.use(auth);
@@ -125,6 +192,8 @@ router.get('/', async (req, res, next) => {
     const snap = await db.collection('students').where('tutor_id', '==', tutorId).get();
     const students = serializeQuerySnapshot(snap);
     const backfill = [];
+    const staleDeliveryClears = [];
+    const botSyncs = [];
     for (const student of students) {
       if (!student.color_hex) {
         const color_hex = generatePastelColor();
@@ -136,10 +205,36 @@ router.get('/', async (req, res, next) => {
           }),
         );
       }
+      if (
+        student.telegram_delivery_status === 'error' &&
+        !hasBlockingDeliveryError(student) &&
+        (student.telegram_user_id || student.telegram_chat_id)
+      ) {
+        student.telegram_delivery_status = 'ok';
+        student.telegram_delivery_error = null;
+        staleDeliveryClears.push(
+          db.collection('students').doc(student._id).update({
+            telegram_delivery_status: 'ok',
+            telegram_delivery_error: null,
+            updatedAt: FieldValue.serverTimestamp(),
+          }),
+        );
+      }
+      if (student.bot_active && student.telegram_link_token) {
+        botSyncs.push(syncTelegramLinkToBot(student));
+      }
     }
     if (backfill.length) {
       // Не блокируем ответ: цвета уже проставлены в payload.
       Promise.all(backfill).catch(() => {});
+    }
+    if (staleDeliveryClears.length) {
+      Promise.all(staleDeliveryClears).catch(() => {});
+    }
+    if (botSyncs.length) {
+      Promise.all(botSyncs).catch((err) => {
+        console.warn('[students] bot link sync failed:', err?.message || err);
+      });
     }
     students.sort((left, right) => {
       const l = left.createdAt ? Date.parse(left.createdAt) : 0;
@@ -159,7 +254,10 @@ router.get('/:id', async (req, res, next) => {
     if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
       return res.status(404).json({ message: 'Student not found' });
     }
-    res.json(withTelegramDeepLink(serializeDoc(studentSnap)));
+    const student = serializeDoc(studentSnap);
+    const clearedDelivery = await syncTelegramLinkToBot(student);
+    const freshSnap = clearedDelivery ? await studentSnap.ref.get() : studentSnap;
+    res.json(withTelegramDeepLink(serializeDoc(freshSnap)));
   } catch (error) {
     next(error);
   }
@@ -525,6 +623,11 @@ router.delete('/:id', async (req, res, next) => {
     }
     const deleted = studentSnap.data();
     await studentRef.delete();
+    void unlinkStudent({
+      studentId: req.params.id,
+      notify: Boolean(deleted.telegram_user_id || deleted.telegram_chat_id),
+      tutorName: await resolveTutorName(tutorId),
+    });
     await writeActivityLog({
       tutorId,
       category: 'students',
@@ -570,8 +673,12 @@ router.post('/:id/telegram-disconnect', async (req, res, next) => {
       updatedAt: FieldValue.serverTimestamp(),
     });
 
-    // Best-effort: clear bot SQLite binding so notifies stop immediately.
-    void unlinkStudent({ studentId: req.params.id });
+    // Notify student in Telegram, then clear bot binding.
+    void unlinkStudent({
+      studentId: req.params.id,
+      notify: true,
+      tutorName: await resolveTutorName(tutorId),
+    });
 
     await writeActivityLog({
       tutorId,
@@ -649,7 +756,25 @@ router.post('/:id/topup', async (req, res, next) => {
       updatedAt: FieldValue.serverTimestamp(),
     });
     const updatedSnap = await studentRef.get();
-    const updated = serializeDoc(updatedSnap);
+    let updated = serializeDoc(updatedSnap);
+
+    if (
+      (updated.telegram_user_id || updated.telegram_chat_id) &&
+      updated.telegram_delivery_status === 'error' &&
+      !hasBlockingDeliveryError(updated)
+    ) {
+      await studentRef.update({
+        telegram_delivery_status: 'ok',
+        telegram_delivery_error: null,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      updated = {
+        ...updated,
+        telegram_delivery_status: 'ok',
+        telegram_delivery_error: null,
+      };
+    }
+
     await writeActivityLog({
       tutorId,
       category: 'students',
@@ -675,17 +800,20 @@ router.post('/:id/topup', async (req, res, next) => {
 
     let telegram_receipt_sent = false;
     const settings = normalizeTelegramSettings(updated.telegram_notification_settings);
+    const skipReceipt = req.body.send_receipt === false;
     const wantsReceipt =
-      req.body.send_receipt !== undefined
-        ? Boolean(req.body.send_receipt)
-        : settings.payment_receipt_enabled;
-    const canNotify =
-      wantsReceipt &&
+      !skipReceipt &&
+      settings.payment_receipt_enabled &&
       updated.bot_active &&
       (updated.telegram_user_id || updated.telegram_chat_id) &&
-      updated.telegram_delivery_status !== 'error';
+      !hasBlockingDeliveryError(updated);
 
-    if (canNotify) {
+    if (wantsReceipt) {
+      const cleared = await clearStaleDeliveryError(studentRef, updated);
+      if (cleared) {
+        Object.assign(updated, cleared);
+      }
+      console.log('[students/topup] sending telegram receipt', updated._id, updated.telegram_username || updated.telegram_chat_id);
       const unitLabel = rateUnit === 'lesson' ? 'ур.' : 'ч';
       const amountLabel =
         moneyAmount > 0 && currency
@@ -701,33 +829,39 @@ router.post('/:id/topup', async (req, res, next) => {
           rateUnit,
           tutorName: await resolveTutorName(tutorId),
         });
+        const deliveryPatch = await applyNotifyDeliveryOutcome(studentRef, notifyResult, {
+          currentStatus: updated.telegram_delivery_status,
+          studentId: updated._id,
+        });
         if (notifyResult?.ok) {
           telegram_receipt_sent = true;
-          if (updated.telegram_delivery_status === 'error') {
-            await studentRef.update({
-              telegram_delivery_status: 'ok',
-              telegram_delivery_error: null,
-              updatedAt: FieldValue.serverTimestamp(),
-            });
-          }
+          console.log('[students/topup] telegram receipt sent', updated._id);
         } else if (!notifyResult?.skipped) {
-          const code = mapDeliveryError(notifyResult);
-          await studentRef.update({
-            telegram_delivery_status: 'error',
-            telegram_delivery_error: code,
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-          updated.telegram_delivery_status = 'error';
-          updated.telegram_delivery_error = code;
+          console.warn(
+            '[students/topup] telegram receipt failed',
+            updated._id,
+            notifyResult?.error || notifyResult?.detail || notifyResult?.status,
+          );
         }
-      } catch {
-        // Не блокируем ответ CRM.
+        if (deliveryPatch) {
+          Object.assign(updated, deliveryPatch);
+        }
+      } catch (err) {
+        console.error('[students/topup] telegram receipt exception', updated._id, err?.message || err);
       }
+    } else if (settings.payment_receipt_enabled) {
+      console.warn('[students/topup] receipt not attempted', updated._id, {
+        skipReceipt,
+        bot_active: updated.bot_active,
+        linked: Boolean(updated.telegram_user_id || updated.telegram_chat_id),
+        blocking: hasBlockingDeliveryError(updated),
+      });
     }
 
     res.json({
       ...withTelegramDeepLink(updated),
       telegram_receipt_sent,
+      telegram_receipt_attempted: wantsReceipt,
     });
   } catch (error) {
     next(error);
@@ -788,9 +922,13 @@ router.post('/:id/balance-adjust', async (req, res, next) => {
       wantsNotify &&
       updated.bot_active &&
       (updated.telegram_user_id || updated.telegram_chat_id) &&
-      updated.telegram_delivery_status !== 'error';
+      !hasBlockingDeliveryError(updated);
 
     if (canNotify) {
+      const cleared = await clearStaleDeliveryError(studentRef, updated);
+      if (cleared) {
+        Object.assign(updated, cleared);
+      }
       try {
         const notifyResult = await notifyBalance({
           studentId: updated._id,
@@ -800,17 +938,15 @@ router.post('/:id/balance-adjust', async (req, res, next) => {
           rateUnit,
           tutorName: await resolveTutorName(tutorId),
         });
+        const deliveryPatch = await applyNotifyDeliveryOutcome(studentRef, notifyResult, {
+          currentStatus: updated.telegram_delivery_status,
+          studentId: updated._id,
+        });
         if (notifyResult?.ok) {
           telegram_notified = true;
-        } else if (!notifyResult?.skipped) {
-          const code = mapDeliveryError(notifyResult);
-          await studentRef.update({
-            telegram_delivery_status: 'error',
-            telegram_delivery_error: code,
-            updatedAt: FieldValue.serverTimestamp(),
-          });
-          updated.telegram_delivery_status = 'error';
-          updated.telegram_delivery_error = code;
+        }
+        if (deliveryPatch) {
+          Object.assign(updated, deliveryPatch);
         }
       } catch {
         // CRM response not blocked.
@@ -915,7 +1051,9 @@ router.post('/:id/telegram-parent-disconnect', async (req, res, next) => {
     }
     const before = studentSnap.data();
     const settings = normalizeTelegramSettings(before.telegram_notification_settings);
-    const nextTargets = (settings.routing_targets || []).filter((t) => t !== 'parent');
+    const nextTargets = (settings.routing_targets || []).filter(
+      (t) => t !== 'parent' && t !== 'tutor',
+    );
     const nextSettings = normalizeTelegramSettings({
       ...settings,
       routing_targets: nextTargets.length ? nextTargets : ['student'],

@@ -9,8 +9,10 @@ const {
 } = require('../utils/lessonSnapshot');
 const { writeActivityLog } = require('../utils/activityLog');
 const { resolveTutorName } = require('../utils/tutorName');
+const { resolveTutorTimezone } = require('../utils/lessonNotifyTime');
+const { resolveActiveVacation } = require('../utils/userWorkspaceSettings');
 
-const ALLOWED_LANG = new Set(['ru', 'en', 'de', 'kz', 'uk', 'by']);
+const ALLOWED_LANG = new Set(['ru', 'en', 'de']);
 
 const crypto = require('crypto');
 
@@ -85,6 +87,8 @@ router.post('/telegram-linked', async (req, res, next) => {
         telegram_linked_at: FieldValue.serverTimestamp(),
         telegram_unlink_pending: false,
         telegram_unlinked_username: null,
+        telegram_delivery_status: 'ok',
+        telegram_delivery_error: null,
         bot_active: true,
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -95,7 +99,7 @@ router.post('/telegram-linked', async (req, res, next) => {
       ok: true,
       student_id: updated._id,
       role: isParent ? 'parent' : 'student',
-      bot_lang: updated.bot_lang || 'ru',
+      bot_lang: updated.bot_lang || 'de',
     });
   } catch (error) {
     next(error);
@@ -253,13 +257,19 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
     });
     unitsConsumed = Math.round(unitsConsumed * 100) / 100;
 
-    // Пополнено ≈ остаток + списанные единицы (занятия или часы).
+    // Пополнено: total_topup_units (если ведётся), иначе остаток + списанное.
+    const storedTopup = Number(student.total_topup_units);
+    const inferredTopup = Math.round((balance + unitsConsumed) * 100) / 100;
     const toppedUp =
-      billingType === 'package' ? Math.round((balance + unitsConsumed) * 100) / 100 : completed;
-    // hour: только фактическая выручка по урокам (учитывает длительность).
-    // lesson: фикс × число пополнений/проведённых.
+      billingType === 'package'
+        ? Number.isFinite(storedTopup) && storedTopup > 0
+          ? Math.round(Math.max(storedTopup, inferredTopup) * 100) / 100
+          : inferredTopup
+        : completed;
+    // package: оплачено ≈ ставка × пополненные единицы (даже без completed-уроков).
+    // postpaid hour: фактическая выручка по урокам.
     const paidAmount =
-      rateUnit === 'lesson' && rate > 0
+      rate > 0 && (billingType === 'package' || rateUnit === 'lesson')
         ? Math.round(toppedUp * rate * 100) / 100
         : Math.round(earned * 100) / 100;
 
@@ -317,13 +327,34 @@ router.get('/students/:id/profile', async (req, res, next) => {
     const student = serializeDoc(snap);
     const tutorId = student.tutor_id || null;
     const tutorName = tutorId ? await resolveTutorName(tutorId) : null;
+    let vacationActive = false;
+    let vacationMessage = '';
+    let vacationEndDate = '';
+    let vacationStartDate = '';
+    if (tutorId) {
+      const tutorSnap = await db.collection('users').doc(String(tutorId)).get();
+      const tz = await resolveTutorTimezone(tutorId);
+      const vacation = resolveActiveVacation(
+        tutorSnap.exists ? tutorSnap.data()?.vacation : null,
+        tz,
+      );
+      vacationActive = vacation.active;
+      vacationMessage = vacation.message || '';
+      vacationEndDate = vacation.endDate || '';
+      vacationStartDate = vacation.startDate || '';
+    }
     res.json({
       student_id: studentId,
       name: student.name || null,
-      bot_lang: ALLOWED_LANG.has(student.bot_lang) ? student.bot_lang : 'ru',
+      subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
+      bot_lang: ALLOWED_LANG.has(student.bot_lang) ? student.bot_lang : 'de',
       bot_active: Boolean(student.bot_active),
       telegram_username: student.telegram_username || null,
       tutor_name: tutorName,
+      vacation_active: vacationActive,
+      vacation_message: vacationMessage,
+      vacation_end_date: vacationEndDate,
+      vacation_start_date: vacationStartDate,
     });
   } catch (error) {
     next(error);

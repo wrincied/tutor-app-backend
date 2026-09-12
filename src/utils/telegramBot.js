@@ -19,6 +19,26 @@ function newLinkToken() {
   return crypto.randomBytes(16).toString('hex');
 }
 
+function formatBotError(detail) {
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === 'object' && item.msg) {
+          return String(item.msg);
+        }
+        return String(item);
+      })
+      .join('; ');
+  }
+  if (detail && typeof detail === 'object' && detail.message) {
+    return String(detail.message);
+  }
+  return detail != null ? String(detail) : '';
+}
+
 async function botFetch(pathname, { method = 'POST', body } = {}) {
   const { baseUrl, secret, enabled } = botConfig();
   if (!enabled) {
@@ -35,7 +55,19 @@ async function botFetch(pathname, { method = 'POST', body } = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { ok: false, status: res.status, error: data.detail || data.message || res.statusText };
+      const error = formatBotError(data.detail || data.message) || res.statusText;
+      return { ok: false, status: res.status, error };
+    }
+    // Notify endpoints return { ok: true|false, ... } in the body — unwrap it.
+    if (data && typeof data === 'object' && Object.prototype.hasOwnProperty.call(data, 'ok')) {
+      if (data.ok === false) {
+        return {
+          ok: false,
+          error: data.error || 'unknown',
+          detail: data.detail || null,
+        };
+      }
+      return { ok: true, ...data };
     }
     return { ok: true, data };
   } catch (err) {
@@ -133,9 +165,13 @@ async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorNa
   });
 }
 
-async function unlinkStudent({ studentId }) {
+async function unlinkStudent({ studentId, notify = false, tutorName = null }) {
   return botFetch('/v1/unlink', {
-    body: { student_id: studentId },
+    body: {
+      student_id: studentId,
+      notify: Boolean(notify),
+      tutor_name: tutorName || null,
+    },
   });
 }
 

@@ -15,6 +15,7 @@ const {
 } = require('../utils/lessonNotifyTime');
 const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
 const { expireEndedTrials } = require('../utils/trialExpiry');
+const { runBillingWorkerCycle } = require('../utils/billingWorker');
 
 const COMPLETE_BUFFER_MS = 30 * 60 * 1000;
 const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки напоминания
@@ -62,7 +63,9 @@ async function loadStudent(studentId) {
 }
 
 function canNotifyStudent(student) {
-  return Boolean(student?.bot_active && student?.telegram_user_id);
+  return Boolean(
+    student?.bot_active && (student?.telegram_user_id || student?.telegram_chat_id),
+  );
 }
 
 async function canNotifyTutorStudent(tutorId, student) {
@@ -139,7 +142,8 @@ async function processReminders(now = Date.now()) {
 }
 
 /**
- * Через 30 минут после окончания урока → completed + домашка + баланс.
+ * Через 30 минут после окончания одиночного урока → completed + списание + TG.
+ * Recurring обрабатывает billingWorker (completedDates).
  */
 async function processAutoComplete(now = Date.now()) {
   const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
@@ -147,7 +151,7 @@ async function processAutoComplete(now = Date.now()) {
 
   for (const doc of snap.docs) {
     const lesson = { _id: doc.id, ...doc.data() };
-    if (lesson.post_lesson_notified === true) {
+    if (lesson.isRecurring === true || lesson.rrule) {
       continue;
     }
     const endMs = lessonEndMs(lesson);
@@ -160,44 +164,62 @@ async function processAutoComplete(now = Date.now()) {
 
     const student = await loadStudent(lesson.student_id);
     const tutorId = lesson.tutor;
+    const lessonRef = doc.ref;
+
     if (!tutorId || !student) {
-      await doc.ref.update({
+      await lessonRef.update({
         status: 'completed',
         completed_at: FieldValue.serverTimestamp(),
+        billing_processed: true,
+        balance_debited: false,
         updatedAt: FieldValue.serverTimestamp(),
       });
       completed += 1;
       continue;
     }
 
-    const batch = db.batch();
-    const lessonRef = doc.ref;
-    const studentRef = db.collection('students').doc(student._id);
-    batch.update(lessonRef, {
-      status: 'completed',
-      updatedAt: FieldValue.serverTimestamp(),
-    });
-    applyLessonStatusBilling(batch, {
-      tutorId,
-      studentId: student._id,
-      studentName: student.name,
-      studentRef,
-      lessonRef,
-      lessonId: lesson._id,
-      previousStatus: 'scheduled',
-      nextStatus: 'completed',
-      balanceDebited: Boolean(lesson.balance_debited),
-      billingProcessed: Boolean(lesson.billing_processed),
-      studentBillingType: student.billing_type,
-      studentRateUnit: student.rate_unit,
-      lessonDuration: lesson.lesson_duration,
-      balanceUnitsDebited: lesson.balance_units_debited,
-      autoDebitEnabled: student.auto_debit_enabled !== false,
-      manualCompletion: true,
-      studentBalance: student.balance_lessons,
-    });
-    await batch.commit();
-    completed += 1;
+    if (student.auto_debit_enabled === false) {
+      await lessonRef.update({
+        status: 'completed',
+        completed_at: FieldValue.serverTimestamp(),
+        billing_processed: true,
+        balance_debited: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      completed += 1;
+    } else {
+      const batch = db.batch();
+      const studentRef = db.collection('students').doc(student._id);
+      batch.update(lessonRef, {
+        status: 'completed',
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      applyLessonStatusBilling(batch, {
+        tutorId,
+        studentId: student._id,
+        studentName: student.name,
+        studentRef,
+        lessonRef,
+        lessonId: lesson._id,
+        previousStatus: 'scheduled',
+        nextStatus: 'completed',
+        balanceDebited: Boolean(lesson.balance_debited),
+        billingProcessed: Boolean(lesson.billing_processed),
+        studentBillingType: student.billing_type,
+        studentRateUnit: student.rate_unit,
+        lessonDuration: lesson.lesson_duration,
+        balanceUnitsDebited: lesson.balance_units_debited,
+        autoDebitEnabled: true,
+        manualCompletion: true,
+        studentBalance: student.balance_lessons,
+      });
+      await batch.commit();
+      completed += 1;
+    }
+
+    if (lesson.post_lesson_notified === true) {
+      continue;
+    }
 
     if (!(await canNotifyTutorStudent(tutorId, student))) {
       await lessonRef.update({
@@ -246,8 +268,14 @@ async function tick() {
     }
     const reminded = await processReminders();
     const done = await processAutoComplete();
-    if (reminded || done) {
-      console.log(`[lessonBotNotify] reminders=${reminded} autoComplete=${done}`);
+    // Recurring + delayed debit for completed&unprocessed (no second single auto-complete).
+    const billing = await runBillingWorkerCycle({ autoCompleteSingles: false });
+    if (reminded || done || billing.autoRecurring || billing.recurringBilled || billing.dueBilled) {
+      console.log(
+        `[lessonBotNotify] reminders=${reminded} autoComplete=${done}` +
+          ` recurringDone=${billing.autoRecurring} recurringBilled=${billing.recurringBilled}` +
+          ` delayedBilled=${billing.dueBilled}`,
+      );
     }
   } catch (err) {
     console.error('[lessonBotNotify] tick failed:', err.message || err);

@@ -131,10 +131,13 @@ app.get('/api/health/firestore', limitHealth, async (req, res) => {
 app.use(errorHandler);
 
 const { startLessonBotNotifyWorker } = require('./src/workers/lessonBotNotify');
+const { startBillingWorker } = require('./src/utils/billingWorker');
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT} (Firestore)`);
   console.log(`CORS origins: ${parseCorsOrigins().join(', ')}`);
   startLessonBotNotifyWorker();
+  // Fallback only when LESSON_BOT_NOTIFY_DISABLED=1; otherwise cycle runs from notify tick.
+  startBillingWorker();
 });

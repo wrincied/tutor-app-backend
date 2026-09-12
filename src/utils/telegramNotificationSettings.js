@@ -1,7 +1,8 @@
 const BUILTIN = new Set([15, 30, 60, 1440]);
 const LEGACY = new Set([15, 30, 60, 120, 1440]);
-const ROUTINGS = new Set(['student', 'tutor', 'both']);
+const { FieldValue } = require('../firebase');
 const TARGETS = new Set(['student', 'parent', 'tutor']);
+const DISABLED_TARGETS = new Set(['parent', 'tutor']);
 const OFFSET_MIN = 5;
 const OFFSET_MAX = 7 * 24 * 60;
 
@@ -35,14 +36,19 @@ function routingFromTargets(targets) {
   return 'student';
 }
 
+function stripDisabledTargets(targets) {
+  const filtered = targets.filter((item) => !DISABLED_TARGETS.has(item));
+  return filtered.length > 0 ? filtered : ['student'];
+}
+
 function normalizeRoutingTargets(raw) {
   if (Array.isArray(raw?.routing_targets)) {
     const unique = [...new Set(raw.routing_targets.filter((item) => TARGETS.has(item)))];
     if (unique.length > 0) {
-      return unique;
+      return stripDisabledTargets(unique);
     }
   }
-  return targetsFromRouting(String(raw?.routing || 'student'));
+  return stripDisabledTargets(targetsFromRouting(String(raw?.routing || 'student')));
 }
 
 function normalizeTelegramSettings(raw) {
@@ -70,7 +76,7 @@ function normalizeTelegramSettings(raw) {
 }
 
 function mapDeliveryError(result) {
-  const text = String(result?.error || '').toLowerCase();
+  const text = `${result?.error || ''} ${result?.detail || ''}`.toLowerCase();
   if (result?.status === 403 || text.includes('blocked') || text.includes('forbidden')) {
     return 'BOT_BLOCKED';
   }
@@ -80,12 +86,56 @@ function mapDeliveryError(result) {
   if (text.includes('deactivated') || text.includes('user is deactivated')) {
     return 'USER_DEACTIVATED';
   }
+  if (text.includes('not_linked') || text.includes('not linked')) {
+    return 'NOT_LINKED';
+  }
+  if (text.includes('bot_inactive') || text.includes('bot inactive')) {
+    return 'BOT_INACTIVE';
+  }
   return 'UNKNOWN';
+}
+
+/** Only these should block future Telegram receipts in CRM. */
+function shouldPersistDeliveryError(code) {
+  return code === 'BOT_BLOCKED' || code === 'CHAT_NOT_FOUND' || code === 'USER_DEACTIVATED';
+}
+
+async function applyNotifyDeliveryOutcome(studentRef, notifyResult, { currentStatus, studentId }) {
+  if (notifyResult?.skipped) {
+    return null;
+  }
+  if (notifyResult?.ok) {
+    await studentRef.update({
+      telegram_delivery_status: 'ok',
+      telegram_delivery_error: null,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { telegram_delivery_status: 'ok', telegram_delivery_error: null };
+  }
+
+  const code = mapDeliveryError(notifyResult);
+  console.warn(
+    '[telegram] notify failed',
+    studentId || studentRef.id,
+    code,
+    notifyResult?.error || notifyResult?.detail || notifyResult?.status,
+  );
+  if (!shouldPersistDeliveryError(code)) {
+    return null;
+  }
+  await studentRef.update({
+    telegram_delivery_status: 'error',
+    telegram_delivery_error: code,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  return { telegram_delivery_status: 'error', telegram_delivery_error: code };
 }
 
 module.exports = {
   normalizeTelegramSettings,
   mapDeliveryError,
+  shouldPersistDeliveryError,
+  applyNotifyDeliveryOutcome,
   clampReminderOffset,
   targetsFromRouting,
   routingFromTargets,

@@ -83,33 +83,68 @@ describe('filterDueLessons', () => {
 });
 
 describe('computeStudentBillingUpdate', () => {
-  it('decrements package balance', () => {
-    const result = computeStudentBillingUpdate({ balance_lessons: 5, billing_type: 'package' });
+  it('decrements package balance by 1 for rate_unit lesson', () => {
+    const result = computeStudentBillingUpdate(
+      { balance_lessons: 5, billing_type: 'package', rate_unit: 'lesson' },
+      { lessonDuration: 60 },
+    );
     assert.deepEqual(result, {
       billingType: 'package',
+      units: 1,
       studentPatch: { balance_lessons: 4 },
       balanceLog: { amount: -1, reason: 'lesson_completed_delayed' },
       balanceDebited: true,
+      balanceUnitsDebited: 1,
     });
   });
 
-  it('treats invalid package balance as zero before debit', () => {
-    const result = computeStudentBillingUpdate({ balance_lessons: 'x', billing_type: 'package' });
-    assert.equal(result.studentPatch.balance_lessons, -1);
+  it('decrements package by hours for rate_unit hour', () => {
+    const result = computeStudentBillingUpdate(
+      { balance_lessons: 3, billing_type: 'package', rate_unit: 'hour' },
+      { lessonDuration: 90 },
+    );
+    assert.equal(result.units, 1.5);
+    assert.equal(result.studentPatch.balance_lessons, 1.5);
+    assert.equal(result.balanceLog.amount, -1.5);
+    assert.equal(result.balanceDebited, true);
   });
 
-  it('increments unpaid count for postpaid', () => {
-    const result = computeStudentBillingUpdate({ unpaid_lessons_count: 2, billing_type: 'postpaid' });
-    assert.deepEqual(result, {
-      billingType: 'postpaid',
-      studentPatch: { unpaid_lessons_count: 3 },
-      balanceLog: { amount: 1, reason: 'lesson_completed_postpaid' },
-      balanceDebited: false,
-    });
+  it('clamps package debit to available balance', () => {
+    const result = computeStudentBillingUpdate(
+      { balance_lessons: 0.5, billing_type: 'package', rate_unit: 'hour' },
+      { lessonDuration: 60 },
+    );
+    assert.equal(result.studentPatch.balance_lessons, 0);
+    assert.equal(result.balanceLog.amount, -0.5);
+    assert.equal(result.balanceDebited, true);
+  });
+
+  it('treats invalid package balance as zero (no negative)', () => {
+    const result = computeStudentBillingUpdate(
+      { balance_lessons: 'x', billing_type: 'package', rate_unit: 'lesson' },
+      { lessonDuration: 60 },
+    );
+    assert.deepEqual(result.studentPatch, {});
+    assert.equal(result.balanceDebited, false);
+    assert.equal(result.balanceLog.amount, -0);
+  });
+
+  it('increments unpaid count for postpaid by units', () => {
+    const result = computeStudentBillingUpdate(
+      { unpaid_lessons_count: 2, billing_type: 'postpaid', rate_unit: 'hour' },
+      { lessonDuration: 90 },
+    );
+    assert.equal(result.billingType, 'postpaid');
+    assert.equal(result.studentPatch.unpaid_lessons_count, 3.5);
+    assert.equal(result.balanceLog.amount, 1.5);
+    assert.equal(result.balanceDebited, false);
   });
 
   it('normalizes per_lesson alias to postpaid', () => {
-    const result = computeStudentBillingUpdate({ unpaid_lessons_count: 0, billing_type: 'per_lesson' });
+    const result = computeStudentBillingUpdate(
+      { unpaid_lessons_count: 0, billing_type: 'per_lesson', rate_unit: 'lesson' },
+      { lessonDuration: 60 },
+    );
     assert.equal(result.billingType, 'postpaid');
     assert.equal(result.studentPatch.unpaid_lessons_count, 1);
   });

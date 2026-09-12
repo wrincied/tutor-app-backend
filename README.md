@@ -233,10 +233,11 @@ Default profile on first bootstrap:
 
 | Worker | Schedule | Role |
 |--------|----------|------|
-| `billingWorker` | Every 10 minutes | Bill completed lessons after buffer; process recurring occurrences |
-| `lessonBotNotify` | Hourly | Telegram reminders; expire admin-granted trials |
+| `lessonBotNotify` | Every 60 seconds | Telegram reminders; auto-complete **single** lessons **30 min after end** (+ debit + homework/balance notify); runs billing cycle for recurring + delayed |
+| `billingWorker` | Via notify tick (or every 10 min if `LESSON_BOT_NOTIFY_DISABLED=1`) | Recurring occurrences + delayed debit for `completed` + `billing_processed: false` |
+| `emailVerificationWorker` | Every 6 hours (when started) | Purge accounts unverified for 3+ days |
 
-`billingWorker` is started automatically in `server.js` on listen.
+`startLessonBotNotifyWorker()` and `startBillingWorker()` start from `server.js` on listen. Lesson auto-complete is **not** done by the midnight Firebase Function (that job is subscriptions only).
 
 ---
 

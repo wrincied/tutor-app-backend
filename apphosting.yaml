@@ -146,6 +146,11 @@ env:
     availability:
       - RUNTIME
 
+  - variable: BOT_API_URL
+    value: https://simple4u-bot-965411338053.europe-west4.run.app
+    availability:
+      - RUNTIME
+
 # Not set from local .env (local-only / placeholders):
-# PORT, FRONTEND_URL (above), JWT_SECRET, TELEGRAM_BOT_TOKEN, BOT_API_URL (localhost)
+# PORT, FRONTEND_URL (above), JWT_SECRET, TELEGRAM_BOT_TOKEN
 # Country-specific STRIPE_PRICE_ID_* — add when created in Live Dashboard.

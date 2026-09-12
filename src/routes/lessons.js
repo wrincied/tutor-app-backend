@@ -76,6 +76,10 @@ async function ensureStudentOwned(studentId, tutorId) {
 
 async function notifyLessonReschedule(tutorId, lesson, studentId) {
   if (!studentId || !lesson?.scheduledAt) {
+    console.log('[notifyLessonReschedule] skip: missing student/schedule', {
+      studentId,
+      scheduledAt: lesson?.scheduledAt,
+    });
     return;
   }
   const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
@@ -84,24 +88,42 @@ async function notifyLessonReschedule(tutorId, lesson, studentId) {
     tutorSnap.exists ? tutorSnap.data()?.subscription_status : 'free',
   );
   if (!hasTelegramAccess(tutorStatus)) {
+    console.log('[notifyLessonReschedule] skip: tutor plan has no telegram', {
+      tutorId,
+      tutorStatus,
+    });
     return;
   }
   const studentSnap = await db.collection('students').doc(String(studentId)).get();
   if (!studentSnap.exists) {
+    console.log('[notifyLessonReschedule] skip: student not found', { studentId });
     return;
   }
   const student = studentSnap.data();
-  if (!student?.bot_active || !student?.telegram_user_id) {
+  const linked = Boolean(student?.telegram_user_id || student?.telegram_chat_id);
+  if (!student?.bot_active || !linked) {
+    console.log('[notifyLessonReschedule] skip: student bot inactive or not linked', {
+      studentId,
+      bot_active: student?.bot_active,
+      has_user_id: Boolean(student?.telegram_user_id),
+      has_chat_id: Boolean(student?.telegram_chat_id),
+    });
     return;
   }
   const tz = await resolveTutorTimezone(tutorId);
   const tutorName = await resolveTutorName(tutorId);
   const meetingLink = student.meeting_link || lesson.meeting_link || null;
-  await notifyLessonMoved({
+  const result = await notifyLessonMoved({
     studentId: String(studentId),
     newTimeLabel: formatLessonTimeLabel(lesson.scheduledAt, tz),
     meetingLink,
     tutorName,
+  });
+  console.log('[notifyLessonReschedule] result', {
+    studentId,
+    ok: result?.ok,
+    error: result?.error || null,
+    skipped: result?.skipped || false,
   });
 }
 
@@ -592,8 +614,22 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
 
     if (timeActuallyMoved && normalizeLessonStatus(nextStatus) === 'scheduled') {
       const studentId = updated.student_id || studentIdForBalance;
+      console.log('[notifyLessonReschedule] schedule moved, notifying', {
+        lessonId: lessonRef.id,
+        studentId,
+        from: existing.scheduledAt,
+        to: nextScheduledAt,
+      });
       notifyLessonReschedule(tutorId, updated, studentId).catch((err) => {
         console.error('notifyLessonReschedule:', err.message);
+      });
+    } else if (scheduleChanged) {
+      console.log('[notifyLessonReschedule] schedule field present but notify skipped', {
+        lessonId: lessonRef.id,
+        timeActuallyMoved,
+        nextStatus,
+        from: existing.scheduledAt,
+        to: nextScheduledAt,
       });
     }
 

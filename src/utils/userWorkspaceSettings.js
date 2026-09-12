@@ -132,6 +132,54 @@ function normalizeVacation(raw) {
   };
 }
 
+function dateKeyInTimeZone(date, timeZone) {
+  const when = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(when.getTime())) {
+    return '';
+  }
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: timeZone || 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(when);
+  } catch {
+    return when.toISOString().slice(0, 10);
+  }
+}
+
+function isDateInVacation(date, vacation, timeZone) {
+  const settings = normalizeVacation(vacation);
+  if (!settings.enabled || !settings.startDate || !settings.endDate) {
+    return false;
+  }
+  const key = dateKeyInTimeZone(date, timeZone);
+  if (!key) {
+    return false;
+  }
+  return key >= settings.startDate && key <= settings.endDate;
+}
+
+/** Active vacation window for a tutor in their timezone. */
+function resolveActiveVacation(vacation, timeZone, at = new Date()) {
+  const settings = normalizeVacation(vacation);
+  if (!isDateInVacation(at, settings, timeZone)) {
+    return {
+      active: false,
+      message: '',
+      startDate: '',
+      endDate: '',
+    };
+  }
+  return {
+    active: true,
+    message: settings.message,
+    startDate: settings.startDate,
+    endDate: settings.endDate,
+  };
+}
+
 module.exports = {
   DEFAULT_WORKSPACE,
   DEFAULT_WORKING_HOURS,
@@ -139,4 +187,7 @@ module.exports = {
   normalizeWorkspace,
   normalizeWorkingHours,
   normalizeVacation,
+  dateKeyInTimeZone,
+  isDateInVacation,
+  resolveActiveVacation,
 };
