@@ -268,6 +268,7 @@ router.post('/', async (req, res, next) => {
     const tutorId = req.user.id;
     const {
       name,
+      subject,
       rate_per_hour,
       rate_currency,
       timezone,
@@ -284,6 +285,10 @@ router.post('/', async (req, res, next) => {
     if (!normalizedName) {
       return res.status(400).json({ message: 'name is required' });
     }
+    const normalizedSubject =
+      subject !== undefined && subject !== null
+        ? String(subject).trim().slice(0, 60)
+        : '';
 
     const planStatus = await loadTutorSubscriptionStatus(tutorId);
     const maxStudents = maxStudentsForPlan(planStatus);
@@ -337,6 +342,7 @@ router.post('/', async (req, res, next) => {
         tx.set(createdRef, {
           tutor_id: tutorId,
           name: normalizedName,
+          subject: normalizedSubject || null,
           rate_per_hour: ratePerHour,
           rate_currency: currency,
           color_hex: studentColor,
@@ -413,6 +419,7 @@ router.put('/:id', async (req, res, next) => {
 
     const {
       name,
+      subject,
       rate_per_hour,
       rate_currency,
       timezone,
@@ -438,6 +445,10 @@ router.put('/:id', async (req, res, next) => {
         return res.status(400).json({ message: 'name is required' });
       }
       patch.name = nextName;
+    }
+    if (subject !== undefined) {
+      const nextSubject = String(subject ?? '').trim().slice(0, 60);
+      patch.subject = nextSubject || null;
     }
     if (rate_per_hour !== undefined) {
       const ratePerHour = Number(rate_per_hour);
