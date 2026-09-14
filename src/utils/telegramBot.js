@@ -148,7 +148,7 @@ async function notifyHomework({ studentId, text, tutorName }) {
   return botFetch('/v1/notify/homework', {
     body: {
       student_id: studentId,
-      text: text || 'Homework',
+      text: text || '',
       tutor_name: tutorName || null,
     },
   });

@@ -231,9 +231,7 @@ async function processAutoComplete(now = Date.now()) {
       continue;
     }
 
-    const homeworkText =
-      (lesson.notes && String(lesson.notes).trim()) ||
-      'Homework: ask your tutor if the assignment was not sent yet.';
+    const homeworkText = (lesson.notes && String(lesson.notes).trim()) || '';
     const tutorName = await resolveTutorName(tutorId);
     await notifyHomework({ studentId: student._id, text: homeworkText, tutorName });
 
