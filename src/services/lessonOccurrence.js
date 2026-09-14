@@ -4,6 +4,7 @@ const { normalizeBillingType, packageDebitAmount, normalizeRateUnit } = require(
 const { appendStudentBalanceLog } = require('../utils/activityLog');
 const { LESSON_BILLING_BUFFER_MS } = require('../utils/lessonBillingConstants');
 const { lessonOccurrenceIntervals, dayKeyFromDate } = require('../utils/lessonRecurrence');
+const { notifyLowPackageBalanceIfNeeded } = require('../utils/lowBalanceNotify');
 
 function normalizeOccurrenceDate(raw) {
   if (!raw) {
@@ -285,6 +286,15 @@ async function debitRecurringOccurrenceIfDue({
     });
   }
   await batch.commit();
+  if (billingType === 'package') {
+    const freshSnap = await studentRef.get();
+    if (freshSnap.exists) {
+      await notifyLowPackageBalanceIfNeeded(studentId, {
+        tutorId,
+        student: { _id: studentId, ...freshSnap.data() },
+      });
+    }
+  }
   return { debited: true, occurrenceDate };
 }
 

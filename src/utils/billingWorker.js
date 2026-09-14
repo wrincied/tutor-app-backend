@@ -6,6 +6,7 @@ const {
   autoCompletePastRecurringOccurrences,
   billDueRecurringOccurrences,
 } = require('../services/lessonOccurrence');
+const { notifyLowPackageBalanceIfNeeded } = require('./lowBalanceNotify');
 
 const BUFFER_MS = LESSON_BILLING_BUFFER_MS;
 const BILLING_TICK_MS = 10 * 60 * 1000;
@@ -103,15 +104,15 @@ function appendBalanceLogTx(tx, { tutorId, studentId, studentName, lessonId, amo
 async function processLessonInTransaction(lessonId) {
   const lessonRef = db.collection('lessons').doc(lessonId);
 
-  await db.runTransaction(async (tx) => {
+  return db.runTransaction(async (tx) => {
     const lessonSnap = await tx.get(lessonRef);
     if (!lessonSnap.exists) {
-      return;
+      return null;
     }
 
     const lesson = lessonSnap.data();
     if (!isLessonDueForBilling(lesson)) {
-      return;
+      return null;
     }
 
     const studentId = lesson.student_id;
@@ -121,13 +122,13 @@ async function processLessonInTransaction(lessonId) {
         billing_processed_at: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
       });
-      return;
+      return null;
     }
 
     const studentRef = db.collection('students').doc(studentId);
     const studentSnap = await tx.get(studentRef);
     if (!studentSnap.exists) {
-      return;
+      return null;
     }
 
     const student = studentSnap.data();
@@ -170,6 +171,25 @@ async function processLessonInTransaction(lessonId) {
       lessonPatch.balance_units_debited = billingUpdate.balanceUnitsDebited;
     }
     tx.update(lessonRef, lessonPatch);
+
+    if (
+      billingUpdate.billingType !== 'package' ||
+      billingUpdate.studentPatch.balance_lessons == null
+    ) {
+      return null;
+    }
+
+    return {
+      studentId,
+      tutorId,
+      balanceLeft: billingUpdate.studentPatch.balance_lessons,
+      rateUnit: normalizeRateUnit(student.rate_unit),
+      botActive: student.bot_active,
+      telegramUserId: student.telegram_user_id,
+      telegramChatId: student.telegram_chat_id,
+      telegramSettings: student.telegram_notification_settings,
+      billingTypeRaw: student.billing_type,
+    };
   });
 }
 
@@ -243,7 +263,22 @@ async function runBillingWorkerCycle(options = {}) {
 
   for (const lessonId of dueLessons) {
     try {
-      await processLessonInTransaction(lessonId);
+      const billed = await processLessonInTransaction(lessonId);
+      if (billed?.studentId != null && billed.balanceLeft != null) {
+        await notifyLowPackageBalanceIfNeeded(billed.studentId, {
+          tutorId: billed.tutorId,
+          student: {
+            _id: billed.studentId,
+            balance_lessons: billed.balanceLeft,
+            billing_type: billed.billingTypeRaw,
+            rate_unit: billed.rateUnit,
+            bot_active: billed.botActive,
+            telegram_user_id: billed.telegramUserId,
+            telegram_chat_id: billed.telegramChatId,
+            telegram_notification_settings: billed.telegramSettings,
+          },
+        });
+      }
     } catch (error) {
       console.error(`[billingWorker] failed lesson ${lessonId}:`, error.message);
     }

@@ -75,6 +75,26 @@ function normalizeTelegramSettings(raw) {
   };
 }
 
+/**
+ * Package students only: fire when tutor enabled the toggle and remaining ≤ threshold.
+ * `balanceLeft` must be the post-debit balance.
+ */
+function shouldNotifyLowPackageBalance(student, balanceLeft) {
+  const billingType = String(student?.billing_type || 'package').toLowerCase();
+  if (billingType === 'postpaid') {
+    return false;
+  }
+  const settings = normalizeTelegramSettings(student?.telegram_notification_settings);
+  if (!settings.low_balance_enabled) {
+    return false;
+  }
+  const balance = Number(balanceLeft);
+  if (!Number.isFinite(balance)) {
+    return false;
+  }
+  return balance <= settings.low_balance_threshold;
+}
+
 function mapDeliveryError(result) {
   const text = `${result?.error || ''} ${result?.detail || ''}`.toLowerCase();
   if (result?.status === 403 || text.includes('blocked') || text.includes('forbidden')) {
@@ -133,6 +153,7 @@ async function applyNotifyDeliveryOutcome(studentRef, notifyResult, { currentSta
 
 module.exports = {
   normalizeTelegramSettings,
+  shouldNotifyLowPackageBalance,
   mapDeliveryError,
   shouldPersistDeliveryError,
   applyNotifyDeliveryOutcome,

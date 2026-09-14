@@ -5,9 +5,11 @@ const { applyLessonStatusBilling } = require('../services/lessonBilling');
 const {
   notifyLessonStart,
   notifyHomework,
-  notifyBalance,
 } = require('../utils/telegramBot');
-const { normalizeTelegramSettings } = require('../utils/telegramNotificationSettings');
+const {
+  normalizeTelegramSettings,
+} = require('../utils/telegramNotificationSettings');
+const { notifyLowPackageBalanceIfNeeded } = require('../utils/lowBalanceNotify');
 const { resolveTutorName } = require('../utils/tutorName');
 const {
   formatLessonTimeLabel,
@@ -231,20 +233,15 @@ async function processAutoComplete(now = Date.now()) {
 
     const homeworkText =
       (lesson.notes && String(lesson.notes).trim()) ||
-      'Домашка: уточни у репетитора, если задание ещё не прислали.';
+      'Homework: ask your tutor if the assignment was not sent yet.';
     const tutorName = await resolveTutorName(tutorId);
     await notifyHomework({ studentId: student._id, text: homeworkText, tutorName });
 
     const fresh = await loadStudent(student._id);
-    const balance = Number(fresh?.balance_lessons) || 0;
-    if ((fresh?.billing_type || 'package') !== 'postpaid') {
-      await notifyBalance({
-        studentId: student._id,
-        lessonsLeft: balance,
-        rateUnit: fresh?.rate_unit,
-        tutorName,
-      });
-    }
+    await notifyLowPackageBalanceIfNeeded(student._id, {
+      tutorId,
+      student: fresh || student,
+    });
 
     await lessonRef.update({
       post_lesson_notified: true,
