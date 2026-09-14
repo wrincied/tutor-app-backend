@@ -188,10 +188,12 @@ router.get('/students/:id/lessons', async (req, res, next) => {
       .map((lesson) => enrichLessonSnapshot(lesson, studentById))
       .filter((lesson) => {
         const at = lesson.scheduledAt ? Date.parse(lesson.scheduledAt) : NaN;
-        if (Number.isNaN(at) || at < windowStart || at > now) {
+        if (Number.isNaN(at) || at < windowStart) {
           return false;
         }
         const status = normalizeLessonStatus(lesson.status);
+        // Completed/missed/canceled stay visible even if scheduledAt is slightly in the future
+        // (timezone quirks / same-day edits). Upcoming scheduled lessons are excluded.
         if (status === 'completed' || status === 'missed' || status === 'canceled') {
           return true;
         }
