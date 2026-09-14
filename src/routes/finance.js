@@ -26,6 +26,8 @@ const {
   expandFinanceOccurrences,
   financeOccurrenceRange,
 } = require('../utils/lessonRecurrence');
+const { selectUnpaidLessonsForSettlement } = require('../utils/topupSettle');
+const { normalizeRateUnit } = require('../utils/studentBilling');
 
 async function loadTutorSubscriptionStatus(tutorId) {
   const snap = await db.collection('users').doc(String(tutorId)).get();
@@ -528,10 +530,35 @@ router.get('/summary', async (req, res, next) => {
     const lessonsBreakdown = [];
     const { start: occurrenceRangeStart, end: occurrenceRangeEnd } = financeOccurrenceRange(from, to);
 
+    const unpaidLessonIds = new Set();
+    const lessonsByStudent = new Map();
+    for (const data of lessons) {
+      if (!data.student_id) {
+        continue;
+      }
+      const list = lessonsByStudent.get(data.student_id) || [];
+      list.push(data);
+      lessonsByStudent.set(data.student_id, list);
+    }
+    for (const [studentId, studentLessons] of lessonsByStudent) {
+      const student = studentById.get(studentId);
+      if (!student) {
+        continue;
+      }
+      for (const unpaid of selectUnpaidLessonsForSettlement(
+        studentLessons,
+        student,
+        normalizeRateUnit(student.rate_unit),
+      )) {
+        unpaidLessonIds.add(unpaid._id || unpaid.id);
+      }
+    }
+
     for (const data of lessons) {
       const student = data.student_id ? studentById.get(data.student_id) : null;
       const lessonCurrency = normalizeCurrency(data.lesson_currency);
       const orphanReason = classifyFinanceOrphan(data);
+      const paymentUnpaid = unpaidLessonIds.has(data._id);
 
       if (orphanReason) {
         const durationMinutes = Number(data.lesson_duration ?? 60);
@@ -551,6 +578,7 @@ router.get('/summary', async (req, res, next) => {
           isRecurring: data.isRecurring === true || Boolean(data.rrule),
           incomeType: 'none',
           hiddenReason: orphanReason,
+          paymentUnpaid: false,
         });
         continue;
       }
@@ -609,6 +637,7 @@ router.get('/summary', async (req, res, next) => {
           incomeType: earned > 0 ? 'completed' : planned > 0 ? 'scheduled' : 'none',
           hiddenReason: null,
           scheduleDerived: Boolean(occurrence.scheduleDerived),
+          paymentUnpaid: paymentUnpaid && status !== 'scheduled',
         });
       }
     }

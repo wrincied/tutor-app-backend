@@ -7,6 +7,7 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
 const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt, parseBalanceAmount } = require('../utils/studentBilling');
+const { settleUnpaidLessonsOnTopup } = require('../utils/topupSettle');
 const { studentSnapshotFromStudent } = require('../utils/lessonSnapshot');
 const {
   collectPatchChanges,
@@ -57,6 +58,25 @@ const {
 } = require('../utils/userProfile');
 
 const ALLOWED_CURRENCY = new Set(['BYN', 'PLN', 'EUR', 'USD', 'RUB', 'KZT', 'UAH']);
+const COLOR_VALUE_RE = /^(#[0-9a-fA-F]{3,8}|hsl\([^)]+\)|rgb\([^)]+\))$/i;
+
+/** @returns {string|null|undefined} normalized color, null if empty, undefined if invalid */
+function normalizeOptionalColor(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized.length > 48 || !COLOR_VALUE_RE.test(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
 
 async function loadTutorSubscriptionStatus(tutorId) {
   const snap = await db.collection('users').doc(String(tutorId)).get();
@@ -269,6 +289,7 @@ router.post('/', async (req, res, next) => {
     const {
       name,
       subject,
+      subject_color,
       rate_per_hour,
       rate_currency,
       timezone,
@@ -302,13 +323,19 @@ router.post('/', async (req, res, next) => {
 
     let studentColor = generatePastelColor();
     if (color_hex !== undefined) {
-      const normalized = String(color_hex).trim();
-      if (
-        normalized.length <= 48 &&
-        /^(#[0-9a-fA-F]{3,8}|hsl\([^)]+\)|rgb\([^)]+\))$/i.test(normalized)
-      ) {
+      const normalized = normalizeOptionalColor(color_hex);
+      if (normalized) {
         studentColor = normalized;
       }
+    }
+
+    let subjectColor = null;
+    if (normalizedSubject) {
+      const normalizedSubjectColor = normalizeOptionalColor(subject_color);
+      if (subject_color !== undefined && normalizedSubjectColor === undefined) {
+        return res.status(400).json({ message: 'Invalid subject_color' });
+      }
+      subjectColor = normalizedSubjectColor || generatePastelColor();
     }
 
     const billingType = normalizeBillingType(billing_type);
@@ -343,6 +370,7 @@ router.post('/', async (req, res, next) => {
           tutor_id: tutorId,
           name: normalizedName,
           subject: normalizedSubject || null,
+          subject_color: subjectColor,
           rate_per_hour: ratePerHour,
           rate_currency: currency,
           color_hex: studentColor,
@@ -420,6 +448,7 @@ router.put('/:id', async (req, res, next) => {
     const {
       name,
       subject,
+      subject_color,
       rate_per_hour,
       rate_currency,
       timezone,
@@ -449,6 +478,20 @@ router.put('/:id', async (req, res, next) => {
     if (subject !== undefined) {
       const nextSubject = String(subject ?? '').trim().slice(0, 60);
       patch.subject = nextSubject || null;
+      if (!nextSubject) {
+        patch.subject_color = null;
+      }
+    }
+    if (subject_color !== undefined) {
+      const normalizedSubjectColor = normalizeOptionalColor(subject_color);
+      if (normalizedSubjectColor === undefined) {
+        return res.status(400).json({ message: 'Invalid subject_color' });
+      }
+      const nextSubject =
+        patch.subject !== undefined
+          ? patch.subject
+          : String(before.subject ?? '').trim() || null;
+      patch.subject_color = nextSubject ? normalizedSubjectColor : null;
     }
     if (rate_per_hour !== undefined) {
       const ratePerHour = Number(rate_per_hour);
@@ -486,11 +529,8 @@ router.put('/:id', async (req, res, next) => {
       patch.credit_limit = parseNonNegativeInt(credit_limit, 0);
     }
     if (color_hex !== undefined) {
-      const normalized = String(color_hex).trim();
-      if (
-        normalized.length > 48 ||
-        !/^(#[0-9a-fA-F]{3,8}|hsl\([^)]+\)|rgb\([^)]+\))$/i.test(normalized)
-      ) {
+      const normalized = normalizeOptionalColor(color_hex);
+      if (!normalized) {
         return res.status(400).json({ message: 'Invalid color_hex' });
       }
       patch.color_hex = normalized;
@@ -760,6 +800,14 @@ router.post('/:id/topup', async (req, res, next) => {
       at: paidAt.toISOString(),
     };
 
+    const settlement = await settleUnpaidLessonsOnTopup({
+      studentId: studentRef.id,
+      student: before,
+      units: added,
+      rateUnit,
+      paidAtIso: last_topup.at,
+    });
+
     await studentRef.update({
       balance_lessons: FieldValue.increment(added),
       total_topup_units: FieldValue.increment(added),
@@ -806,6 +854,8 @@ router.post('/:id/topup', async (req, res, next) => {
         money_amount: moneyAmount,
         currency,
         paid_at: last_topup.at,
+        settled_lesson_ids: settlement.settledLessonIds,
+        settled_units: settlement.settledUnits,
       },
     });
 

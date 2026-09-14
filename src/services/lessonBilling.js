@@ -77,6 +77,8 @@ function applyBalanceDebit(
       balance_debited: true,
       billing_processed: true,
       balance_units_debited: units,
+      unpaid_debt: true,
+      settled_by_payment_at: FieldValue.delete(),
       updatedAt: FieldValue.serverTimestamp(),
     });
     appendBalanceLog(batch, {
@@ -87,7 +89,7 @@ function applyBalanceDebit(
       amount: -units,
       reason,
     });
-    return { debited: true, amount: units };
+    return { debited: true, amount: units, unpaidDebt: true };
   }
 
   const available = Math.max(0, safeCurrent);
@@ -103,6 +105,8 @@ function applyBalanceDebit(
       balance_debited: true,
       billing_processed: true,
       balance_units_debited: actualDebit,
+      unpaid_debt: false,
+      settled_by_payment_at: new Date().toISOString(),
       updatedAt: FieldValue.serverTimestamp(),
     });
     appendBalanceLog(batch, {
@@ -116,14 +120,16 @@ function applyBalanceDebit(
     return { debited: true, amount: actualDebit };
   }
 
-  // Баланс уже 0 — статус меняем без списания.
+  // Баланс уже 0 — статус меняем без списания (урок в долг).
   batch.update(lessonRef, {
     balance_debited: false,
     billing_processed: true,
     balance_units_debited: FieldValue.delete(),
+    unpaid_debt: true,
+    settled_by_payment_at: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
   });
-  return { debited: false, amount: 0, clamped: true };
+  return { debited: false, amount: 0, clamped: true, unpaidDebt: true };
 }
 
 function applyBalanceRefund(
@@ -148,6 +154,8 @@ function applyBalanceRefund(
     balance_debited: false,
     billing_processed: false,
     balance_units_debited: FieldValue.delete(),
+    unpaid_debt: false,
+    settled_by_payment_at: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
   });
   appendBalanceLog(batch, {
@@ -236,6 +244,8 @@ function applyLessonStatusBilling(batch, {
         billing_processed: true,
         balance_debited: false,
         balance_units_debited: debitAmount,
+        unpaid_debt: true,
+        settled_by_payment_at: FieldValue.delete(),
       });
       appendBalanceLog(batch, {
         tutorId,
