@@ -176,15 +176,24 @@ router.get('/students/:id/lessons', async (req, res, next) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     const student = serializeDoc(studentSnap);
-    const limit = Math.min(15, Math.max(1, Number(req.query.limit) || 15));
     const page = Math.max(1, Number(req.query.page) || 1);
     const windowDays = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const pageDays = Math.min(
+      windowDays,
+      Math.max(1, Number(req.query.page_days) || Math.ceil(windowDays / 2)),
+    );
     const now = Date.now();
-    const windowStart = now - windowDays * 24 * 60 * 60 * 1000;
+    const dayMs = 24 * 60 * 60 * 1000;
+    const windowStart = now - windowDays * dayMs;
+    const pages = Math.max(1, Math.ceil(windowDays / pageDays));
+    const safePage = Math.min(page, pages);
+    // Page 1 = most recent slice; page 2 = previous half-month, etc.
+    const sliceEnd = now - (safePage - 1) * pageDays * dayMs;
+    const sliceStart = Math.max(windowStart, sliceEnd - pageDays * dayMs);
 
     const lessonsSnap = await db.collection('lessons').where('student_id', '==', studentId).get();
     const studentById = new Map([[studentId, student]]);
-    const filtered = serializeQuerySnapshot(lessonsSnap)
+    const inWindow = serializeQuerySnapshot(lessonsSnap)
       .map((lesson) => enrichLessonSnapshot(lesson, studentById))
       .filter((lesson) => {
         const at = lesson.scheduledAt ? Date.parse(lesson.scheduledAt) : NaN;
@@ -192,8 +201,6 @@ router.get('/students/:id/lessons', async (req, res, next) => {
           return false;
         }
         const status = normalizeLessonStatus(lesson.status);
-        // Completed/missed/canceled stay visible even if scheduledAt is slightly in the future
-        // (timezone quirks / same-day edits). Upcoming scheduled lessons are excluded.
         if (status === 'completed' || status === 'missed' || status === 'canceled') {
           return true;
         }
@@ -205,31 +212,45 @@ router.get('/students/:id/lessons', async (req, res, next) => {
         return r - l;
       });
 
-    const total = filtered.length;
-    const pages = Math.max(1, Math.ceil(total / limit) || 1);
-    const safePage = Math.min(page, pages);
-    const offset = (safePage - 1) * limit;
-    const items = filtered.slice(offset, offset + limit).map((lesson) => {
-      const status = normalizeLessonStatus(lesson.status);
-      const price = lessonRevenueFromSnapshot(lesson);
-      return {
-        id: lesson._id,
-        scheduledAt: lesson.scheduledAt || null,
-        status,
-        duration_minutes: Number(lesson.lesson_duration) || 60,
-        price,
-        currency: lesson.lesson_currency || student.rate_currency || 'EUR',
-      };
+    const olderHalfHasItems = inWindow.some((lesson) => {
+      const at = Date.parse(lesson.scheduledAt);
+      return at < now - pageDays * dayMs;
     });
+    const effectivePages = olderHalfHasItems ? pages : 1;
+    const effectivePage = Math.min(safePage, effectivePages);
+
+    const effSliceEnd = now - (effectivePage - 1) * pageDays * dayMs;
+    const effSliceStart = Math.max(windowStart, effSliceEnd - pageDays * dayMs);
+
+    const items = inWindow
+      .filter((lesson) => {
+        const at = Date.parse(lesson.scheduledAt);
+        if (effectivePage === 1) {
+          return at >= effSliceStart;
+        }
+        return at >= effSliceStart && at < effSliceEnd;
+      })
+      .map((lesson) => {
+        const status = normalizeLessonStatus(lesson.status);
+        const price = lessonRevenueFromSnapshot(lesson);
+        return {
+          id: lesson._id,
+          scheduledAt: lesson.scheduledAt || null,
+          status,
+          duration_minutes: Number(lesson.lesson_duration) || 60,
+          price,
+          currency: lesson.lesson_currency || student.rate_currency || 'EUR',
+        };
+      });
 
     res.json({
       student_id: studentId,
       timezone: student.timezone || 'UTC',
       subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
-      page: safePage,
-      pages,
-      total,
-      limit,
+      page: effectivePage,
+      pages: effectivePages,
+      total: inWindow.length,
+      page_days: pageDays,
       days: windowDays,
       items,
     });
