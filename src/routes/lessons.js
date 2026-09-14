@@ -118,6 +118,7 @@ async function notifyLessonReschedule(tutorId, lesson, studentId) {
     newTimeLabel: formatLessonTimeLabel(lesson.scheduledAt, tz),
     meetingLink,
     tutorName,
+    subject: student.subject || null,
   });
   console.log('[notifyLessonReschedule] result', {
     studentId,

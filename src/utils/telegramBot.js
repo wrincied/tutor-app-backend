@@ -132,7 +132,7 @@ async function notifyBalance({
   return botFetch('/v1/notify/balance', { body });
 }
 
-async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingLink, tutorName }) {
+async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingLink, tutorName, subject }) {
   return botFetch('/v1/notify/lesson-start', {
     body: {
       student_id: studentId,
@@ -140,6 +140,7 @@ async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingL
       time_label: timeLabel || '',
       meeting_link: meetingLink || null,
       tutor_name: tutorName || null,
+      subject: subject ? String(subject).trim().slice(0, 120) : null,
     },
   });
 }
@@ -154,13 +155,14 @@ async function notifyHomework({ studentId, text, tutorName }) {
   });
 }
 
-async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorName }) {
+async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorName, subject }) {
   return botFetch('/v1/notify/lesson-moved', {
     body: {
       student_id: studentId,
       new_time_label: newTimeLabel || '',
       meeting_link: meetingLink || null,
       tutor_name: tutorName || null,
+      subject: subject ? String(subject).trim().slice(0, 120) : null,
     },
   });
 }

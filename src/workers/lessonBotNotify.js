@@ -128,6 +128,7 @@ async function processReminders(now = Date.now()) {
       timeLabel: formatLessonTimeLabel(lesson.scheduledAt, tz),
       meetingLink,
       tutorName,
+      subject: student.subject || null,
     });
 
     await doc.ref.update({

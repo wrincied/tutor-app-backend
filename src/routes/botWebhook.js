@@ -213,6 +213,7 @@ router.get('/students/:id/lessons', async (req, res, next) => {
     res.json({
       student_id: studentId,
       timezone: student.timezone || 'UTC',
+      subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
       items,
     });
   } catch (error) {
@@ -287,6 +288,7 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
       rate_unit: rateUnit,
       paid_amount: paidAmount,
       earned_amount: Math.round(earned * 100) / 100,
+      subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
     });
   } catch (error) {
     next(error);
