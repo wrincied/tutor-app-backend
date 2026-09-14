@@ -24,6 +24,7 @@ const {
   withTelegramDeepLink,
 } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
+const { resolveTutorTimezone } = require('../utils/lessonNotifyTime');
 const {
   normalizeTelegramSettings,
   applyNotifyDeliveryOutcome,
@@ -890,6 +891,8 @@ router.post('/:id/topup', async (req, res, next) => {
           rateUnit,
           tutorName: await resolveTutorName(tutorId),
           balanceAfter: updated.balance_lessons,
+          paidAt: last_topup.at,
+          timezone: await resolveTutorTimezone(tutorId),
         });
         const deliveryPatch = await applyNotifyDeliveryOutcome(studentRef, notifyResult, {
           currentStatus: updated.telegram_delivery_status,

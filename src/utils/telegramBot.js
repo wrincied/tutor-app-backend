@@ -97,7 +97,7 @@ async function setBotActive({ studentId, botActive }) {
   });
 }
 
-async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, rateUnit, balanceAfter }) {
+async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, rateUnit, balanceAfter, paidAt, timezone }) {
   return botFetch('/v1/notify/payment', {
     body: {
       student_id: studentId,
@@ -106,6 +106,8 @@ async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, 
       tutor_name: tutorName || null,
       rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
       balance_after: balanceAfter != null && !Number.isNaN(Number(balanceAfter)) ? Number(balanceAfter) : null,
+      paid_at: paidAt || null,
+      timezone: timezone || null,
     },
   });
 }
