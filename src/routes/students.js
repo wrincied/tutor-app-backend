@@ -889,6 +889,7 @@ router.post('/:id/topup', async (req, res, next) => {
           lessonsAdded: added,
           rateUnit,
           tutorName: await resolveTutorName(tutorId),
+          balanceAfter: updated.balance_lessons,
         });
         const deliveryPatch = await applyNotifyDeliveryOutcome(studentRef, notifyResult, {
           currentStatus: updated.telegram_delivery_status,

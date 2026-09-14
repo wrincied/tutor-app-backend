@@ -176,44 +176,59 @@ router.get('/students/:id/lessons', async (req, res, next) => {
       return res.status(404).json({ message: 'Student not found' });
     }
     const student = serializeDoc(studentSnap);
-    const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 15));
+    const limit = Math.min(15, Math.max(1, Number(req.query.limit) || 15));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const windowDays = Math.min(90, Math.max(1, Number(req.query.days) || 30));
+    const now = Date.now();
+    const windowStart = now - windowDays * 24 * 60 * 60 * 1000;
 
     const lessonsSnap = await db.collection('lessons').where('student_id', '==', studentId).get();
     const studentById = new Map([[studentId, student]]);
-    const now = Date.now();
-    const items = serializeQuerySnapshot(lessonsSnap)
+    const filtered = serializeQuerySnapshot(lessonsSnap)
       .map((lesson) => enrichLessonSnapshot(lesson, studentById))
       .filter((lesson) => {
+        const at = lesson.scheduledAt ? Date.parse(lesson.scheduledAt) : NaN;
+        if (Number.isNaN(at) || at < windowStart || at > now) {
+          return false;
+        }
         const status = normalizeLessonStatus(lesson.status);
         if (status === 'completed' || status === 'missed' || status === 'canceled') {
           return true;
         }
-        const at = lesson.scheduledAt ? Date.parse(lesson.scheduledAt) : NaN;
-        return !Number.isNaN(at) && at < now;
+        return at < now;
       })
       .sort((a, b) => {
         const l = a.scheduledAt ? Date.parse(a.scheduledAt) : 0;
         const r = b.scheduledAt ? Date.parse(b.scheduledAt) : 0;
         return r - l;
-      })
-      .slice(0, limit)
-      .map((lesson) => {
-        const status = normalizeLessonStatus(lesson.status);
-        const price = lessonRevenueFromSnapshot(lesson);
-        return {
-          id: lesson._id,
-          scheduledAt: lesson.scheduledAt || null,
-          status,
-          duration_minutes: Number(lesson.lesson_duration) || 60,
-          price,
-          currency: lesson.lesson_currency || student.rate_currency || 'EUR',
-        };
       });
+
+    const total = filtered.length;
+    const pages = Math.max(1, Math.ceil(total / limit) || 1);
+    const safePage = Math.min(page, pages);
+    const offset = (safePage - 1) * limit;
+    const items = filtered.slice(offset, offset + limit).map((lesson) => {
+      const status = normalizeLessonStatus(lesson.status);
+      const price = lessonRevenueFromSnapshot(lesson);
+      return {
+        id: lesson._id,
+        scheduledAt: lesson.scheduledAt || null,
+        status,
+        duration_minutes: Number(lesson.lesson_duration) || 60,
+        price,
+        currency: lesson.lesson_currency || student.rate_currency || 'EUR',
+      };
+    });
 
     res.json({
       student_id: studentId,
       timezone: student.timezone || 'UTC',
       subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
+      page: safePage,
+      pages,
+      total,
+      limit,
+      days: windowDays,
       items,
     });
   } catch (error) {

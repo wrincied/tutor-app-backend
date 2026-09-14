@@ -97,7 +97,7 @@ async function setBotActive({ studentId, botActive }) {
   });
 }
 
-async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, rateUnit }) {
+async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, rateUnit, balanceAfter }) {
   return botFetch('/v1/notify/payment', {
     body: {
       student_id: studentId,
@@ -105,6 +105,7 @@ async function notifyPayment({ studentId, amountLabel, lessonsAdded, tutorName, 
       lessons_added: Number(lessonsAdded) || 0,
       tutor_name: tutorName || null,
       rate_unit: rateUnit === 'lesson' ? 'lesson' : 'hour',
+      balance_after: balanceAfter != null && !Number.isNaN(Number(balanceAfter)) ? Number(balanceAfter) : null,
     },
   });
 }
@@ -132,7 +133,17 @@ async function notifyBalance({
   return botFetch('/v1/notify/balance', { body });
 }
 
-async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingLink, tutorName, subject }) {
+async function notifyLessonStart({
+  studentId,
+  minutesBefore,
+  timeLabel,
+  meetingLink,
+  tutorName,
+  subject,
+  scheduledAt,
+  durationMinutes,
+  timezone,
+}) {
   return botFetch('/v1/notify/lesson-start', {
     body: {
       student_id: studentId,
@@ -141,6 +152,9 @@ async function notifyLessonStart({ studentId, minutesBefore, timeLabel, meetingL
       meeting_link: meetingLink || null,
       tutor_name: tutorName || null,
       subject: subject ? String(subject).trim().slice(0, 120) : null,
+      scheduled_at: scheduledAt || null,
+      duration_minutes: durationMinutes != null ? Number(durationMinutes) : 60,
+      timezone: timezone || null,
     },
   });
 }
@@ -155,7 +169,16 @@ async function notifyHomework({ studentId, text, tutorName }) {
   });
 }
 
-async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorName, subject }) {
+async function notifyLessonMoved({
+  studentId,
+  newTimeLabel,
+  meetingLink,
+  tutorName,
+  subject,
+  oldScheduledAt,
+  newScheduledAt,
+  timezone,
+}) {
   return botFetch('/v1/notify/lesson-moved', {
     body: {
       student_id: studentId,
@@ -163,6 +186,9 @@ async function notifyLessonMoved({ studentId, newTimeLabel, meetingLink, tutorNa
       meeting_link: meetingLink || null,
       tutor_name: tutorName || null,
       subject: subject ? String(subject).trim().slice(0, 120) : null,
+      old_scheduled_at: oldScheduledAt || null,
+      new_scheduled_at: newScheduledAt || null,
+      timezone: timezone || null,
     },
   });
 }

@@ -129,6 +129,9 @@ async function processReminders(now = Date.now()) {
       meetingLink,
       tutorName,
       subject: student.subject || null,
+      scheduledAt: lesson.scheduledAt || null,
+      durationMinutes: Number(lesson.lesson_duration) || 60,
+      timezone: tz,
     });
 
     await doc.ref.update({

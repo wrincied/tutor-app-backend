@@ -74,7 +74,7 @@ async function ensureStudentOwned(studentId, tutorId) {
   return studentData;
 }
 
-async function notifyLessonReschedule(tutorId, lesson, studentId) {
+async function notifyLessonReschedule(tutorId, lesson, studentId, oldScheduledAt = null) {
   if (!studentId || !lesson?.scheduledAt) {
     console.log('[notifyLessonReschedule] skip: missing student/schedule', {
       studentId,
@@ -119,6 +119,9 @@ async function notifyLessonReschedule(tutorId, lesson, studentId) {
     meetingLink,
     tutorName,
     subject: student.subject || null,
+    oldScheduledAt: oldScheduledAt || null,
+    newScheduledAt: lesson.scheduledAt || null,
+    timezone: tz,
   });
   console.log('[notifyLessonReschedule] result', {
     studentId,
@@ -621,7 +624,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
         from: existing.scheduledAt,
         to: nextScheduledAt,
       });
-      notifyLessonReschedule(tutorId, updated, studentId).catch((err) => {
+      notifyLessonReschedule(tutorId, updated, studentId, existing.scheduledAt).catch((err) => {
         console.error('notifyLessonReschedule:', err.message);
       });
     } else if (scheduleChanged) {
