@@ -321,6 +321,7 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
       credit_limit: creditLimit,
       lessons_completed: completed,
       lessons_topped_up: toppedUp,
+      units_consumed: unitsConsumed,
       rate_per_hour: rate,
       rate_currency: currency,
       rate_unit: rateUnit,
