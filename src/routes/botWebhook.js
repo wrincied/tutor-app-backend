@@ -327,7 +327,16 @@ router.get('/students/:id/payment-summary', async (req, res, next) => {
       rate_unit: rateUnit,
       paid_amount: paidAmount,
       earned_amount: Math.round(earned * 100) / 100,
+      timezone: student.timezone || 'UTC',
       subject: student.subject ? String(student.subject).trim().slice(0, 120) : null,
+      last_topup: student.last_topup
+        ? {
+            amount_money: Number(student.last_topup.amount_money) || 0,
+            currency: student.last_topup.currency || currency,
+            units: Number(student.last_topup.units) || 0,
+            at: student.last_topup.at || null,
+          }
+        : null,
     });
   } catch (error) {
     next(error);
