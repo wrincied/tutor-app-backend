@@ -3,6 +3,8 @@ const DEFAULT_PROD_ORIGINS = [
   'https://www.simple4u.at',
   'https://simple4u-64822.web.app',
   'https://simple4u-64822.firebaseapp.com',
+  /** GitHub Pages team preview: https://wrincied.github.io/tutor-app/dev/ */
+  'https://wrincied.github.io',
 ];
 const DEFAULT_LOCAL_ORIGINS = [
   'http://localhost:4200',
@@ -35,7 +37,7 @@ function parseCorsOrigins() {
     : [];
   const merged = [...new Set([...fromEnv, ...defaultOrigins().map(normalizeOrigin)])];
   if (process.env.NODE_ENV === 'production') {
-    return merged.filter((origin) => !isLocalOrigin(origin) && origin !== 'https://wrincied.github.io');
+    return merged.filter((origin) => !isLocalOrigin(origin));
   }
   return merged;
 }

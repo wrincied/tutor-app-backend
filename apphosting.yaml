@@ -17,7 +17,8 @@ env:
       https://simple4u.at,
       https://www.simple4u.at,
       https://simple4u-64822.web.app,
-      https://simple4u-64822.firebaseapp.com
+      https://simple4u-64822.firebaseapp.com,
+      https://wrincied.github.io
     availability:
       - RUNTIME
 
