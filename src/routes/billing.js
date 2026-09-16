@@ -835,6 +835,28 @@ router.post('/cancel-subscription', billingAuth, async (req, res, next) => {
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
     if (!subId) {
+      // Already canceled / free, or manual admin grant without Stripe.
+      const label = subscriptionLabel(user.subscription_status);
+      if (label === 'free' || user.cancel_at_period_end) {
+        const updated = enrichUserProfile(user);
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+      if (!hasStripeBillingArtifacts(user)) {
+        const cancelAt =
+          user.trial_ends_at || user.subscription_current_period_end || user.subscription_cancel_at || null;
+        await db.collection('users').doc(req.user.id).update({
+          cancel_at_period_end: true,
+          subscription_cancel_at: cancelAt,
+          subscription_updated_at: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        const updated = enrichUserProfile(
+          serializeDoc(await db.collection('users').doc(req.user.id).get()),
+        );
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
       return res.status(400).json({
         message: 'No active Stripe subscription on this account',
       });
