@@ -18,9 +18,38 @@ function uniqueDates(list) {
   return [...new Set((list ?? []).map((item) => String(item).slice(0, 10)).filter(Boolean))];
 }
 
+function sumBalanceLogNet(rows, occurrenceDate = null) {
+  let net = 0;
+  const wantDate = occurrenceDate != null ? String(occurrenceDate).slice(0, 10) : null;
+  for (const data of rows) {
+    if (wantDate != null) {
+      if (String(data?.occurrenceDate ?? '').slice(0, 10) !== wantDate) {
+        continue;
+      }
+    }
+    const amount = Number(data?.amount);
+    if (Number.isFinite(amount)) {
+      net += amount;
+    }
+  }
+  return Math.round(net * 100) / 100;
+}
+
+async function occurrenceBalanceNet(lessonId, occurrenceDate = null) {
+  const snap = await db.collection('balance_logs').where('lessonId', '==', String(lessonId)).limit(200).get();
+  return sumBalanceLogNet(
+    snap.docs.map((doc) => doc.data()),
+    occurrenceDate,
+  );
+}
+
 async function occurrenceBalanceDebited(lessonId, occurrenceDate) {
-  const snap = await db.collection('balance_logs').where('lessonId', '==', lessonId).limit(100).get();
-  return snap.docs.some((doc) => String(doc.data().occurrenceDate ?? '').slice(0, 10) === occurrenceDate);
+  const net = await occurrenceBalanceNet(lessonId, occurrenceDate);
+  return net !== 0;
+}
+
+async function lessonBalanceNet(lessonId) {
+  return occurrenceBalanceNet(lessonId, null);
 }
 
 function appendBalanceLogEntry(batch, {
@@ -124,6 +153,7 @@ function creditPackageOccurrence(batch, {
   lessonId,
   occurrenceDate,
   amount = 1,
+  reason = 'lesson_occurrence_uncompleted_refund',
 }) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
   batch.update(studentRef, {
@@ -139,7 +169,7 @@ function creditPackageOccurrence(batch, {
     studentName,
     lessonId,
     amount: units,
-    reason: 'lesson_occurrence_uncompleted_refund',
+    reason,
     occurrenceDate,
   });
 }
@@ -642,66 +672,61 @@ async function applyRecurringOccurrenceStatus({
 async function excludeRecurringOccurrence({ tutorId, lessonRef, existing, occurrenceDate }) {
   const dates = withOccurrenceStatusDates(existing, occurrenceDate, 'scheduled');
   const exdates = uniqueDates([...(existing.exdates ?? []), occurrenceDate]).filter(Boolean);
-  await lessonRef.update({
+  const lessonId = lessonRef.id;
+  const studentId = existing.student_id ? String(existing.student_id) : null;
+  const net = studentId ? await occurrenceBalanceNet(lessonId, occurrenceDate) : 0;
+
+  const batch = db.batch();
+  batch.update(lessonRef, {
     ...dates,
     exdates,
     status: 'scheduled',
     updatedAt: FieldValue.serverTimestamp(),
   });
-  return { excluded: true, occurrenceDate };
-}
 
-async function autoCompletePastRecurringOccurrences(now = Date.now()) {
-  const rangeEnd = new Date(now);
-  const rangeStart = new Date(now);
-  rangeStart.setDate(rangeStart.getDate() - 90);
-
-  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
-  let completed = 0;
-
-  for (const doc of snap.docs) {
-    const existing = doc.data();
-    const recurring = existing.isRecurring === true || Boolean(existing.rrule);
-    if (!recurring || !existing.rrule || !existing.student_id) {
-      continue;
-    }
-
-    const intervals = lessonOccurrenceIntervals(existing, rangeStart, rangeEnd);
-    const completedDates = uniqueDates(existing.completedDates);
-
-    for (const interval of intervals) {
-      if (interval.end > now) {
-        continue;
+  if (studentId && net !== 0) {
+    const studentRef = db.collection('students').doc(studentId);
+    const studentSnap = await studentRef.get();
+    if (studentSnap.exists && studentSnap.data().tutor_id === tutorId) {
+      const billingType = normalizeBillingType(studentSnap.data().billing_type);
+      const studentName = studentSnap.data().name ?? existing.student_name;
+      if (billingType === 'package' && net < 0) {
+        creditPackageOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId,
+          occurrenceDate,
+          amount: -net,
+          reason: 'lesson_occurrence_deleted_refund',
+        });
+      } else if (billingType !== 'package' && net > 0) {
+        creditPostpaidOccurrence(batch, {
+          tutorId,
+          studentRef,
+          lessonRef,
+          studentId,
+          studentName,
+          lessonId,
+          occurrenceDate,
+          amount: net,
+        });
       }
-      const occurrenceDate = dayKeyFromDate(new Date(interval.start));
-      if (completedDates.includes(occurrenceDate)) {
-        continue;
-      }
-
-      const studentRef = db.collection('students').doc(existing.student_id);
-      const studentSnap = await studentRef.get();
-      if (!studentSnap.exists) {
-        continue;
-      }
-
-      await applyRecurringOccurrenceStatus({
-        tutorId: existing.tutor,
-        lessonRef: doc.ref,
-        existing,
-        occurrenceDate,
-        nextStatus: 'completed',
-        shouldDeduct: false,
-        autoDebitEnabled: studentSnap.data().auto_debit_enabled !== false,
-        studentSnap,
-        studentRef,
-        billImmediately: false,
-      });
-      completedDates.push(occurrenceDate);
-      completed += 1;
     }
   }
 
-  return { completed };
+  await batch.commit();
+  return { excluded: true, occurrenceDate, refunded: net !== 0 };
+}
+
+/**
+ * Past recurring occurrences are NOT auto-marked completed.
+ * Completed (+ debit) only when the tutor sets status via API.
+ */
+async function autoCompletePastRecurringOccurrences(_now = Date.now()) {
+  return { completed: 0 };
 }
 
 async function billDueRecurringOccurrences(now = Date.now()) {
@@ -755,5 +780,8 @@ module.exports = {
   billDueRecurringOccurrences,
   excludeRecurringOccurrence,
   occurrenceBalanceDebited,
+  occurrenceBalanceNet,
+  lessonBalanceNet,
+  sumBalanceLogNet,
   hadOccurrenceBillingMarker,
 };

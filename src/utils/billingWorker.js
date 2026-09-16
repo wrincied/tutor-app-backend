@@ -203,9 +203,9 @@ function lessonEndMs(lesson) {
 }
 
 /**
- * Legacy path: mark singles completed at lesson end (no immediate debit).
- * Prefer lessonBotNotify.processAutoComplete (end + 30m → status + debit).
- * Kept for fallback when LESSON_BOT_NOTIFY_DISABLED=1.
+ * Legacy fallback: mark singles completed at lesson end without debit.
+ * Prefer lessonBotNotify.processAutoComplete (end + 30m → status only).
+ * billing_processed:true so delayed worker does not auto-debit.
  */
 async function autoCompletePastSingleLessons(now = Date.now()) {
   const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
@@ -223,7 +223,7 @@ async function autoCompletePastSingleLessons(now = Date.now()) {
     await doc.ref.update({
       status: 'completed',
       completed_at: new Date(endMs),
-      billing_processed: false,
+      billing_processed: true,
       balance_debited: false,
       updatedAt: FieldValue.serverTimestamp(),
     });
