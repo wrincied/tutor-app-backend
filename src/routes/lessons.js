@@ -20,7 +20,8 @@ const {
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
 const { normalizeRecurrenceFields, dayKeyFromDate, lessonWithEffectiveSchedule } = require('../utils/lessonRecurrence');
-const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates, hadOccurrenceBillingMarker } = require('../services/lessonOccurrence');
+const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates, hadOccurrenceBillingMarker, lessonBalanceNet } = require('../services/lessonOccurrence');
+const { normalizeBillingType } = require('../utils/studentBilling');
 const { notifyLessonMoved } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
 const {
@@ -693,26 +694,61 @@ router.delete('/:id', async (req, res, next) => {
     const batch = db.batch();
     batch.delete(lessonRef);
 
-    if (existing.student_id && existing.balance_debited) {
+    if (existing.student_id) {
       const studentRef = db.collection('students').doc(existing.student_id);
       const studentSnap = await studentRef.get();
       if (studentSnap.exists && studentSnap.data().tutor_id === tutorId) {
-        const units =
-          existing.balance_units_debited != null && Number(existing.balance_units_debited) > 0
-            ? Math.round(Number(existing.balance_units_debited) * 100) / 100
-            : 1;
-        batch.update(studentRef, {
-          balance_lessons: FieldValue.increment(units),
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-        appendBalanceLog(batch, {
-          tutorId,
-          studentId: existing.student_id,
-          studentName: studentSnap.data().name,
-          lessonId: lessonRef.id,
-          amount: units,
-          reason: 'lesson_deleted_refund',
-        });
+        const net = await lessonBalanceNet(lessonRef.id);
+        const studentName = studentSnap.data().name;
+        // Package: balance_logs store debits as negative → refund -net when net < 0.
+        // Fallback to lesson.balance_debited when logs are missing (legacy).
+        if (net < 0) {
+          const units = Math.round(-net * 100) / 100;
+          batch.update(studentRef, {
+            balance_lessons: FieldValue.increment(units),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          appendBalanceLog(batch, {
+            tutorId,
+            studentId: existing.student_id,
+            studentName,
+            lessonId: lessonRef.id,
+            amount: units,
+            reason: 'lesson_deleted_refund',
+          });
+        } else if (existing.balance_debited) {
+          const units =
+            existing.balance_units_debited != null && Number(existing.balance_units_debited) > 0
+              ? Math.round(Number(existing.balance_units_debited) * 100) / 100
+              : 1;
+          batch.update(studentRef, {
+            balance_lessons: FieldValue.increment(units),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          appendBalanceLog(batch, {
+            tutorId,
+            studentId: existing.student_id,
+            studentName,
+            lessonId: lessonRef.id,
+            amount: units,
+            reason: 'lesson_deleted_refund',
+          });
+        } else if (net > 0 && normalizeBillingType(studentSnap.data().billing_type) !== 'package') {
+          // Postpaid occurrence/series logs use positive amounts on debit.
+          const units = Math.round(net * 100) / 100;
+          batch.update(studentRef, {
+            unpaid_lessons_count: FieldValue.increment(-units),
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          appendBalanceLog(batch, {
+            tutorId,
+            studentId: existing.student_id,
+            studentName,
+            lessonId: lessonRef.id,
+            amount: -units,
+            reason: 'lesson_deleted_postpaid_refund',
+          });
+        }
       }
     }
 

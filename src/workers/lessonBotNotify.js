@@ -1,7 +1,5 @@
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
-const { normalizeLessonStatus } = require('../utils/lessonSnapshot');
-const { applyLessonStatusBilling } = require('../services/lessonBilling');
 const {
   notifyLessonStart,
   notifyHomework,
@@ -9,7 +7,6 @@ const {
 const {
   normalizeTelegramSettings,
 } = require('../utils/telegramNotificationSettings');
-const { notifyLowPackageBalanceIfNeeded } = require('../utils/lowBalanceNotify');
 const { resolveTutorName } = require('../utils/tutorName');
 const {
   formatLessonTimeLabel,
@@ -148,8 +145,9 @@ async function processReminders(now = Date.now()) {
 }
 
 /**
- * Через 30 минут после окончания одиночного урока → completed + списание + TG.
- * Recurring обрабатывает billingWorker (completedDates).
+ * Через 30 минут после окончания одиночного урока → completed (без списания) + TG.
+ * Пакет/постоплата списываются только при ручном completed от тьютора.
+ * Recurring не авто-завершается (см. autoCompletePastRecurringOccurrences).
  */
 async function processAutoComplete(now = Date.now()) {
   const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
@@ -172,55 +170,18 @@ async function processAutoComplete(now = Date.now()) {
     const tutorId = lesson.tutor;
     const lessonRef = doc.ref;
 
-    if (!tutorId || !student) {
-      await lessonRef.update({
-        status: 'completed',
-        completed_at: FieldValue.serverTimestamp(),
-        billing_processed: true,
-        balance_debited: false,
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-      completed += 1;
-      continue;
-    }
+    // Status only — never debit here (billing_processed:true blocks delayed worker).
+    await lessonRef.update({
+      status: 'completed',
+      completed_at: FieldValue.serverTimestamp(),
+      billing_processed: true,
+      balance_debited: false,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    completed += 1;
 
-    if (student.auto_debit_enabled === false) {
-      await lessonRef.update({
-        status: 'completed',
-        completed_at: FieldValue.serverTimestamp(),
-        billing_processed: true,
-        balance_debited: false,
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-      completed += 1;
-    } else {
-      const batch = db.batch();
-      const studentRef = db.collection('students').doc(student._id);
-      batch.update(lessonRef, {
-        status: 'completed',
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-      applyLessonStatusBilling(batch, {
-        tutorId,
-        studentId: student._id,
-        studentName: student.name,
-        studentRef,
-        lessonRef,
-        lessonId: lesson._id,
-        previousStatus: 'scheduled',
-        nextStatus: 'completed',
-        balanceDebited: Boolean(lesson.balance_debited),
-        billingProcessed: Boolean(lesson.billing_processed),
-        studentBillingType: student.billing_type,
-        studentRateUnit: student.rate_unit,
-        lessonDuration: lesson.lesson_duration,
-        balanceUnitsDebited: lesson.balance_units_debited,
-        autoDebitEnabled: true,
-        manualCompletion: true,
-        studentBalance: student.balance_lessons,
-      });
-      await batch.commit();
-      completed += 1;
+    if (!tutorId || !student) {
+      continue;
     }
 
     if (lesson.post_lesson_notified === true) {
@@ -238,12 +199,6 @@ async function processAutoComplete(now = Date.now()) {
     const homeworkText = (lesson.notes && String(lesson.notes).trim()) || '';
     const tutorName = await resolveTutorName(tutorId);
     await notifyHomework({ studentId: student._id, text: homeworkText, tutorName });
-
-    const fresh = await loadStudent(student._id);
-    await notifyLowPackageBalanceIfNeeded(student._id, {
-      tutorId,
-      student: fresh || student,
-    });
 
     await lessonRef.update({
       post_lesson_notified: true,
