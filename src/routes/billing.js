@@ -835,6 +835,49 @@ router.post('/cancel-subscription', billingAuth, async (req, res, next) => {
 
     const subId = await resolveStripeSubscriptionId(stripe, user);
     if (!subId) {
+      const label = subscriptionLabel(user.subscription_status);
+      const provider = String(user.billing_provider || '')
+        .trim()
+        .toLowerCase();
+      // Admin / manual grant (no Stripe sub): drop entitlements immediately.
+      const isAdminOrManualGrant =
+        provider === 'admin' || (!hasStripeBillingArtifacts(user) && provider !== 'tribute');
+
+      if (label === 'free') {
+        const updated = enrichUserProfile(user);
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+
+      if (isAdminOrManualGrant) {
+        await db.collection('users').doc(req.user.id).update({
+          subscription_status: 'free',
+          billing_provider: FieldValue.delete(),
+          trial_ends_at: FieldValue.delete(),
+          cancel_at_period_end: false,
+          subscription_cancel_at: FieldValue.delete(),
+          subscription_current_period_end: FieldValue.delete(),
+          stripe_subscription_id: FieldValue.delete(),
+          stripe_checkout_session_id: FieldValue.delete(),
+          stripe_schedule_id: FieldValue.delete(),
+          pending_plan: FieldValue.delete(),
+          pending_plan_at: FieldValue.delete(),
+          subscription_updated_at: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        const updated = enrichUserProfile(
+          serializeDoc(await db.collection('users').doc(req.user.id).get()),
+        );
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+
+      if (user.cancel_at_period_end) {
+        const updated = enrichUserProfile(user);
+        const { password_hash: _ph, ...safeUser } = updated;
+        return res.json(safeUser);
+      }
+
       return res.status(400).json({
         message: 'No active Stripe subscription on this account',
       });
