@@ -2,7 +2,6 @@ const { admin } = require('../firebase');
 const { primaryFrontendUrl, spaPathLink } = require('../utils/corsOrigins');
 const { toAppActionLink } = require('../utils/authActionLink');
 const { sendMail } = require('./emailService');
-const { isBlockedBrandEmail } = require('../utils/brandEmail');
 
 function buildPasswordResetEmail({ email, link }) {
   const appName = process.env.APP_NAME || 'Simple4U';
@@ -26,15 +25,14 @@ function buildPasswordResetEmail({ email, link }) {
 
 /**
  * Always resolves with { ok: true } for unknown emails (no account enumeration).
+ * Existing Auth users always get a mail — including support@ on the brand domain
+ * (do not use isBlockedBrandEmail here: ADMIN_EMAILS env overrides used to silently
+ * drop resets for support@ when the whitelist omitted it).
  */
 async function sendPasswordResetForEmail(rawEmail) {
   const email = String(rawEmail || '').trim().toLowerCase();
   if (!email || !email.includes('@')) {
     return { ok: false, reason: 'invalid_email' };
-  }
-
-  if (isBlockedBrandEmail(email)) {
-    return { ok: true };
   }
 
   try {

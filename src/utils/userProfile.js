@@ -10,8 +10,6 @@ const { normalizeWorkspace, normalizeWorkingHours, normalizeVacation } = require
 
 const ALLOWED_TAX_MODES = new Set([
   'at-self-employed',
-  'de-kleinunternehmer',
-  'pl-ryczalt',
   'ru-usn',
   'ru-ip',
   'by-ip',

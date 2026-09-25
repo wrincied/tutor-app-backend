@@ -28,6 +28,10 @@ const {
 } = require('../utils/lessonRecurrence');
 const { selectUnpaidLessonsForSettlement } = require('../utils/topupSettle');
 const { normalizeRateUnit } = require('../utils/studentBilling');
+const { fetchTutorLessonsForPeriod } = require('../utils/tutorLessonsQuery');
+const { heavyReadLimiter } = require('../middleware/rateLimit');
+
+const limitHeavySummary = heavyReadLimiter();
 
 async function loadTutorSubscriptionStatus(tutorId) {
   const snap = await db.collection('users').doc(String(tutorId)).get();
@@ -85,58 +89,23 @@ function parseDateQuery(value) {
 }
 
 /**
- * Summary с from/to: не грузим всю историю уроков.
- * Берём recurring-серии + one-off в окне дат (±1 день из‑за TZ).
- * При отсутствии индекса — fallback на полный scan.
+ * Summary с from/to: recurring-серии + one-off в окне дат (± slack TZ).
+ * Без from/to не вызывается — см. GET /summary.
  */
 async function fetchLessonsSnapForSummary(tutorId, { from, to }) {
-  if (!from || !to) {
-    return db.collection('lessons').where('tutor', '==', tutorId).get();
-  }
+  return fetchTutorLessonsForPeriod(tutorId, { from, to });
+}
 
-  try {
-    const rangeStart = new Date(from);
-    rangeStart.setUTCDate(rangeStart.getUTCDate() - 1);
-    const rangeEnd = new Date(to);
-    rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 2);
-    rangeEnd.setUTCHours(0, 0, 0, 0);
-
-    const fromIso = rangeStart.toISOString();
-    const toIso = rangeEnd.toISOString();
-
-    const [recurringSnap, rangedSnap] = await Promise.all([
-      db.collection('lessons').where('tutor', '==', tutorId).where('isRecurring', '==', true).get(),
-      db
-        .collection('lessons')
-        .where('tutor', '==', tutorId)
-        .where('scheduledAt', '>=', fromIso)
-        .where('scheduledAt', '<', toIso)
-        .get(),
-    ]);
-
-    const byId = new Map();
-    for (const doc of recurringSnap.docs) {
-      byId.set(doc.id, doc);
-    }
-    for (const doc of rangedSnap.docs) {
-      byId.set(doc.id, doc);
-    }
-
-    return {
-      docs: [...byId.values()],
-      empty: byId.size === 0,
-      size: byId.size,
-      forEach(cb) {
-        byId.forEach((doc) => cb(doc));
-      },
-    };
-  } catch (err) {
-    console.warn(
-      '[finance/summary] narrow lessons query failed, fallback full scan:',
-      err?.message || err,
-    );
-    return db.collection('lessons').where('tutor', '==', tutorId).get();
-  }
+/** Expenses for tutor in [from, to] by expense_date (YYYY-MM-DD). No full-history scan. */
+async function fetchExpensesForPeriod(tutorId, { from, to }) {
+  const fromIso = from.toISOString().slice(0, 10);
+  const toIso = to.toISOString().slice(0, 10);
+  return db
+    .collection('expenses')
+    .where('tutor', '==', tutorId)
+    .where('expense_date', '>=', fromIso)
+    .where('expense_date', '<=', toIso)
+    .get();
 }
 
 function parseStoredDate(raw) {
@@ -415,7 +384,7 @@ router.delete('/expenses/:id', requireFinancePlan, async (req, res, next) => {
   }
 });
 
-router.get('/summary', async (req, res, next) => {
+router.get('/summary', limitHeavySummary, async (req, res, next) => {
   try {
     const homeScope = String(req.query.scope || '').toLowerCase() === 'home';
     if (!homeScope) {
@@ -431,6 +400,11 @@ router.get('/summary', async (req, res, next) => {
     const tutorId = req.user.id;
     const from = parseDateQuery(req.query.from);
     const to = parseDateQuery(req.query.to);
+    if (!from || !to) {
+      return res.status(400).json({
+        message: 'Query params from and to (YYYY-MM-DD) are required',
+      });
+    }
 
     // Курсы стартуют параллельно с Firestore (кэш ~1ч — почти мгновенно).
     // Home: не ждём ЦБ — иначе summary упирается в timeout ~12s при недоступном банке.
@@ -438,8 +412,8 @@ router.get('/summary', async (req, res, next) => {
     const lessonsStarted = Date.now();
     console.log('[finance/summary] start', {
       homeScope,
-      from: from ? from.toISOString().slice(0, 10) : null,
-      to: to ? to.toISOString().slice(0, 10) : null,
+      from: from.toISOString().slice(0, 10),
+      to: to.toISOString().slice(0, 10),
       tutorId,
     });
 
@@ -447,18 +421,16 @@ router.get('/summary', async (req, res, next) => {
       fetchLessonsSnapForSummary(tutorId, { from, to }),
       homeScope
         ? Promise.resolve({ forEach() {}, empty: true, size: 0 })
-        : db.collection('expenses').where('tutor', '==', tutorId).get(),
+        : fetchExpensesForPeriod(tutorId, { from, to }),
       db.collection('users').doc(tutorId).get(),
       db.collection('students').where('tutor_id', '==', tutorId).get(),
     ]);
 
-    if (from && to) {
-      console.log('[finance/summary] lessons loaded', {
-        homeScope,
-        count: lessonsSnap.size,
-        ms: Date.now() - lessonsStarted,
-      });
-    }
+    console.log('[finance/summary] lessons loaded', {
+      homeScope,
+      count: lessonsSnap.size,
+      ms: Date.now() - lessonsStarted,
+    });
 
     const studentById = new Map();
     const studentsHome = [];
@@ -466,14 +438,7 @@ router.get('/summary', async (req, res, next) => {
       const row = serializeDoc(doc);
       studentById.set(row._id, row);
       if (homeScope) {
-        studentsHome.push({
-          _id: row._id,
-          name: row.name ?? '',
-          color_hex: row.color_hex ?? null,
-          balance_lessons: Number(row.balance_lessons) || 0,
-          billing_type: row.billing_type ?? 'package',
-          rate_unit: row.rate_unit ?? 'hour',
-        });
+        studentsHome.push(row);
       }
     });
     const lessons = serializeQuerySnapshot(lessonsSnap).map((lesson) =>
@@ -579,6 +544,9 @@ router.get('/summary', async (req, res, next) => {
           incomeType: 'none',
           hiddenReason: orphanReason,
           paymentUnpaid: false,
+          notes: data.notes ? String(data.notes).trim() : null,
+          memo: data.memo ? String(data.memo).trim() : null,
+          title: data.title ? String(data.title).trim() : null,
         });
         continue;
       }
@@ -638,6 +606,9 @@ router.get('/summary', async (req, res, next) => {
           hiddenReason: null,
           scheduleDerived: Boolean(occurrence.scheduleDerived),
           paymentUnpaid: paymentUnpaid && status !== 'scheduled',
+          notes: data.notes ? String(data.notes).trim() : null,
+          memo: data.memo ? String(data.memo).trim() : null,
+          title: data.title ? String(data.title).trim() : null,
         });
       }
     }

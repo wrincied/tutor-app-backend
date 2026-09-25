@@ -57,6 +57,40 @@ function applyAnchorTime(date, anchor) {
   return next;
 }
 
+/**
+ * Переносы отдельных вхождений: ключ — исходная дата вхождения по RRULE (аналог RECURRENCE-ID),
+ * значение — фактическое время. Вхождение остаётся в серии, статусы и биллинг живут по ключу.
+ */
+function normalizeOccurrenceOverrides(raw) {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const occurrenceDate = String(key).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(occurrenceDate)) {
+      continue;
+    }
+    const rawAt = value && typeof value === 'object' ? value.scheduledAt : value;
+    const parsed = rawAt ? new Date(rawAt) : null;
+    if (!parsed || Number.isNaN(parsed.getTime())) {
+      continue;
+    }
+    result[occurrenceDate] = { scheduledAt: parsed.toISOString() };
+  }
+  return result;
+}
+
+/** Фактическое время вхождения: перенос, если он есть, иначе время якоря серии. */
+function occurrenceScheduledDate(lesson, occurrenceDate, anchor, naturalDate) {
+  const overrides = normalizeOccurrenceOverrides(lesson?.occurrenceOverrides);
+  const override = overrides[occurrenceDate];
+  if (override) {
+    return new Date(override.scheduledAt);
+  }
+  return applyAnchorTime(naturalDate, anchor);
+}
+
 function parseStartDate(startDate, anchor) {
   if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(String(startDate))) {
     const [y, m, d] = String(startDate).split('-').map(Number);
@@ -283,8 +317,8 @@ function expandFinanceOccurrences(lesson, rangeStart, rangeEnd) {
   );
 
   return dates.map((occurrence) => {
-    const at = applyAnchorTime(occurrence, anchor);
     const occurrenceDate = dayKeyFromDate(occurrence);
+    const at = occurrenceScheduledDate(working, occurrenceDate, anchor, occurrence);
     return {
       occurrenceDate,
       scheduledAt: at.toISOString(),
@@ -311,7 +345,9 @@ function lessonOccurrenceIntervals(lesson, rangeStart, rangeEnd) {
     if (Number.isNaN(start)) {
       return [];
     }
-    return [{ start, end: start + durationMs }];
+    return [
+      { start, end: start + durationMs, occurrenceDate: dayKeyFromDate(new Date(start)) },
+    ];
   }
 
   const rule = buildRule(lesson);
@@ -325,9 +361,11 @@ function lessonOccurrenceIntervals(lesson, rangeStart, rangeEnd) {
     lesson,
   );
   return dates.map((occurrence) => {
-    const at = applyAnchorTime(occurrence, anchor);
+    // occurrenceDate — исходная дата по RRULE: к ней привязаны статусы, exdates и биллинг.
+    const occurrenceDate = dayKeyFromDate(occurrence);
+    const at = occurrenceScheduledDate(lesson, occurrenceDate, anchor, occurrence);
     const start = at.getTime();
-    return { start, end: start + durationMs };
+    return { start, end: start + durationMs, occurrenceDate };
   });
 }
 
@@ -352,6 +390,79 @@ function buildRruleFromForm({ freq, byDay, untilDate, startDate }) {
     segments.push(formatUntilForRrule(untilDate));
   }
   return segments.join(';');
+}
+
+function serializeRruleParts(parts) {
+  const order = ['FREQ', 'INTERVAL', 'BYDAY', 'BYMONTHDAY', 'COUNT', 'UNTIL'];
+  const keys = [...order.filter((key) => parts[key] != null), ...Object.keys(parts).filter((key) => !order.includes(key) && parts[key] != null)];
+  return keys.map((key) => `${key}=${parts[key]}`).join(';');
+}
+
+function rruleWeekdayCode(date) {
+  return RRULE_WEEKDAY_CODES[(date.getDay() + 6) % 7];
+}
+
+/** Обрезает серию датой окончания: COUNT несовместим с UNTIL, поэтому убирается. */
+function withRruleUntil(rrule, untilDate) {
+  const parts = parseRruleParts(rrule);
+  delete parts.COUNT;
+  parts.UNTIL = `${String(untilDate).replace(/-/g, '').slice(0, 8)}T235959Z`;
+  return serializeRruleParts(parts);
+}
+
+/**
+ * Переносит серию на день недели (или число месяца) целевой даты.
+ * У многодневных серий (MO,WE,FR) весь набор сдвигается на ту же дельту,
+ * иначе серия схлопнулась бы в один день и часть уроков пропала бы из календаря.
+ */
+function withRruleTargetDay(rrule, targetDate, remainingCount = null, sourceDate = null) {
+  const parts = parseRruleParts(rrule);
+  const freq = (parts.FREQ ?? 'WEEKLY').toUpperCase();
+  if (freq === 'MONTHLY') {
+    parts.BYMONTHDAY = String(targetDate.getDate());
+  } else if (freq !== 'DAILY') {
+    const codes = parseByDayFromRrule(rrule);
+    const sourceCode = sourceDate ? rruleWeekdayCode(sourceDate) : null;
+    if (codes.length <= 1) {
+      parts.BYDAY = rruleWeekdayCode(targetDate);
+    } else if (sourceCode && codes.includes(sourceCode)) {
+      const delta = RRULE_WEEKDAY_CODES.indexOf(rruleWeekdayCode(targetDate))
+        - RRULE_WEEKDAY_CODES.indexOf(sourceCode);
+      parts.BYDAY = codes
+        .map((code) => RRULE_WEEKDAY_CODES[(RRULE_WEEKDAY_CODES.indexOf(code) + delta + 7) % 7])
+        .join(',');
+    }
+    // Многодневная серия без известной точки отсчёта: меняем только время, набор дней сохраняем.
+  }
+  if (remainingCount != null) {
+    parts.COUNT = String(remainingCount);
+  }
+  return serializeRruleParts(parts);
+}
+
+/** Даты вхождений серии в [from, to] без exdates — база для сплита. */
+function occurrenceDatesBetween(lesson, from, to) {
+  const rule = buildRule(lesson);
+  if (!rule) {
+    return [];
+  }
+  return filterOccurrenceDates(rule.between(from, endOfLocalDay(to), true), lesson);
+}
+
+/** Первое вхождение серии на дату или позже. */
+function firstOccurrenceOnOrAfter(lesson, from) {
+  const rule = buildRule(lesson);
+  if (!rule) {
+    return null;
+  }
+  const start = new Date(from);
+  start.setHours(0, 0, 0, 0);
+  const exdates = new Set((lesson.exdates ?? []).map((item) => String(item).slice(0, 10)));
+  let cursor = rule.after(start, true);
+  while (cursor && exdates.has(dayKeyFromDate(cursor))) {
+    cursor = rule.after(cursor, false);
+  }
+  return cursor ?? null;
 }
 
 function normalizeRecurrenceFields(body, scheduledAt) {
@@ -408,6 +519,14 @@ module.exports = {
   parseByDayFromRrule,
   parseUntilDate,
   parseRruleParts,
+  normalizeOccurrenceOverrides,
+  occurrenceScheduledDate,
+  applyAnchorTime,
+  withRruleUntil,
+  withRruleTargetDay,
+  rruleWeekdayCode,
+  occurrenceDatesBetween,
+  firstOccurrenceOnOrAfter,
   lessonOccurrenceIntervals,
   expandFinanceOccurrences,
   classifyFinanceOrphan,

@@ -5,6 +5,7 @@ const {
   lessonScheduledRevenueFromSnapshot,
   lessonRevenueFromSnapshot,
   enrichLessonSnapshot,
+  lessonHasCompleteSnapshot,
   normalizePriceMode,
   studentSnapshotFromStudent,
 } = require('./lessonSnapshot');
@@ -85,5 +86,26 @@ describe('lessonSnapshot finance', () => {
     assert.equal(lesson.lesson_price, 40);
     assert.equal(lesson.price_mode, 'hourly');
     assert.equal(lessonScheduledRevenueFromSnapshot(lesson), 40);
+  });
+
+  it('lessonHasCompleteSnapshot requires price, currency, timezone, mode', () => {
+    assert.equal(
+      lessonHasCompleteSnapshot({
+        lesson_price: 40,
+        lesson_currency: 'EUR',
+        student_timezone: 'Europe/Vienna',
+        price_mode: 'hourly',
+      }),
+      true,
+    );
+    assert.equal(
+      lessonHasCompleteSnapshot({
+        lesson_price: 0,
+        lesson_currency: 'EUR',
+        student_timezone: 'UTC',
+        price_mode: 'hourly',
+      }),
+      false,
+    );
   });
 });

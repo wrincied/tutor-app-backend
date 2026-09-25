@@ -5,7 +5,6 @@ const {
   germanIncomeTax,
   computeAustriaSelfEmployedProjection,
   computeTaxProjection,
-  PL_RYCZALT_RATE,
   RU_USN_RATE,
   BY_IP_RATE,
   BY_SELF_EMPLOYED_RATE,
@@ -90,30 +89,18 @@ describe('computeTaxProjection', () => {
     assert.equal(tax.socialInsuranceRate, 0.1812);
   });
 
-  it('computes DE Kleinunternehmer with ESt + Soli, no social', () => {
-    const grossProfit = 30000;
-    const tax = computeTaxProjection('de-kleinunternehmer', {
-      grossProfit,
-      totalIncome: 35000,
-    });
-    const expectedTax = germanIncomeTax(grossProfit);
-    assert.equal(tax.mode, 'de-kleinunternehmer');
-    assert.equal(tax.socialInsurance, 0);
-    assert.equal(tax.incomeTax, expectedTax);
-    assert.equal(tax.netProfit, grossProfit - expectedTax);
-    assert.ok(expectedTax > austrianIncomeTax(0));
+  it('returns null for disabled DE and PL regimes', () => {
+    assert.equal(
+      computeTaxProjection('de-kleinunternehmer', { grossProfit: 30000, totalIncome: 35000 }),
+      null,
+    );
+    assert.equal(
+      computeTaxProjection('pl-ryczalt', { grossProfit: 8000, totalIncome: 10000 }),
+      null,
+    );
+    // Legacy formula helpers remain for reference / old unit checks.
+    assert.ok(germanIncomeTax(30000) > 0);
     assert.ok(DE_SOLIDARITY_SURCHARGE_RATE > 0);
-  });
-
-  it('computes PL ryczałt on revenue, net from gross', () => {
-    const tax = computeTaxProjection('pl-ryczalt', {
-      grossProfit: 8000,
-      totalIncome: 10000,
-    });
-    assert.equal(tax.mode, 'pl-ryczalt');
-    assert.equal(tax.taxableBase, 10000);
-    assert.equal(tax.incomeTax, 10000 * PL_RYCZALT_RATE);
-    assert.equal(tax.netProfit, 8000 - 10000 * PL_RYCZALT_RATE);
   });
 
   it('computes RU USN 6% on revenue', () => {

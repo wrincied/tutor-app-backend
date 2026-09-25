@@ -14,7 +14,7 @@ describe('checkoutOffer', () => {
     assert.equal(yearly.catalogMajor, 99.99);
     assert.equal(yearly.firstChargeMajor, 99.99);
     assert.equal(yearly.referralPercent, 0);
-    assert.equal(yearly.trialDays, 7);
+    assert.equal(yearly.trialDays, 14);
     const monthly = resolveCheckoutOffer(atUser, { plan: 'pro', interval: 'monthly' });
     assert.equal(monthly.catalogMajor, 9.99);
   });

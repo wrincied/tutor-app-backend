@@ -9,6 +9,7 @@ const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const {
   studentSnapshotFromStudent,
   enrichLessonSnapshot,
+  lessonHasCompleteSnapshot,
   normalizeLessonStatus,
 } = require('../utils/lessonSnapshot');
 const {
@@ -19,7 +20,19 @@ const {
   isMissedOrCanceledStatus,
   cancelLessonWithBilling,
 } = require('../services/lessonBilling');
-const { normalizeRecurrenceFields, dayKeyFromDate, lessonWithEffectiveSchedule } = require('../utils/lessonRecurrence');
+const {
+  normalizeRecurrenceFields,
+  dayKeyFromDate,
+  lessonWithEffectiveSchedule,
+  normalizeOccurrenceOverrides,
+  applyAnchorTime,
+  withRruleUntil,
+  withRruleTargetDay,
+  occurrenceDatesBetween,
+  firstOccurrenceOnOrAfter,
+  parseRruleParts,
+  lessonOccurrenceIntervals,
+} = require('../utils/lessonRecurrence');
 const { normalizeOccurrenceDate, applyRecurringOccurrenceStatus, excludeRecurringOccurrence, occurrenceBalanceDebited, uniqueDates, hadOccurrenceBillingMarker } = require('../services/lessonOccurrence');
 const { notifyLessonMoved } = require('../utils/telegramBot');
 const { resolveTutorName } = require('../utils/tutorName');
@@ -28,8 +41,23 @@ const {
   resolveTutorTimezone,
   scheduleTimesEqual,
 } = require('../utils/lessonNotifyTime');
+const { fetchTutorLessonsForPeriod } = require('../utils/tutorLessonsQuery');
+const { heavyReadLimiter } = require('../middleware/rateLimit');
 
+const limitHeavyLessons = heavyReadLimiter();
 const ALLOWED_STATUS = new Set(['scheduled', 'completed', 'missed', 'canceled', 'cancelled']);
+
+function parseDateQuery(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return null;
+  }
+  const d = new Date(`${trimmed}T00:00:00.000Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 function isRecurringSeries(lesson) {
   return lesson?.isRecurring === true || Boolean(lesson?.rrule);
@@ -134,19 +162,29 @@ async function notifyLessonReschedule(tutorId, lesson, studentId, oldScheduledAt
 router.use(auth);
 router.use(requireVerifiedEmail);
 
-router.get('/', async (req, res, next) => {
+router.get('/', limitHeavyLessons, async (req, res, next) => {
   try {
     const tutorId = req.user.id;
-    const [lessonsSnap, studentsSnap] = await Promise.all([
-      db.collection('lessons').where('tutor', '==', tutorId).get(),
-      db.collection('students').where('tutor_id', '==', tutorId).get(),
-    ]);
+    const from = parseDateQuery(String(req.query.from || ''));
+    const to = parseDateQuery(String(req.query.to || ''));
+    if (!from || !to) {
+      return res.status(400).json({
+        message: 'Query params from and to (YYYY-MM-DD) are required',
+      });
+    }
+
+    const lessonsSnap = await fetchTutorLessonsForPeriod(tutorId, { from, to });
+    const lessonsRaw = lessonsSnap.docs.map((doc) => serializeDoc(doc));
+    const needsStudents = lessonsRaw.some((lesson) => !lessonHasCompleteSnapshot(lesson));
     const studentById = new Map();
-    studentsSnap.forEach((doc) => {
-      const row = serializeDoc(doc);
-      studentById.set(row._id, row);
-    });
-    const lessons = serializeQuerySnapshot(lessonsSnap).map((lesson) =>
+    if (needsStudents) {
+      const studentsSnap = await db.collection('students').where('tutor_id', '==', tutorId).get();
+      studentsSnap.forEach((doc) => {
+        const row = serializeDoc(doc);
+        studentById.set(row._id, row);
+      });
+    }
+    const lessons = lessonsRaw.map((lesson) =>
       lessonWithEffectiveSchedule(enrichLessonSnapshot(lesson, studentById)),
     );
     lessons.sort((left, right) => {
@@ -156,6 +194,9 @@ router.get('/', async (req, res, next) => {
     });
     res.json(lessons);
   } catch (error) {
+    if (error?.status === 400) {
+      return res.status(400).json({ message: error.message });
+    }
     next(error);
   }
 });
@@ -169,6 +210,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       status,
       title,
       notes,
+      memo,
       scheduledAt,
     } = req.body;
 
@@ -228,6 +270,7 @@ router.post('/', checkLessonCollision, async (req, res, next) => {
       status: normalizedStatus,
       title: title ? String(title).trim() : '',
       notes: notes ? String(notes).trim() : '',
+      memo: memo ? String(memo).trim() : '',
       scheduledAt: scheduledAt ? String(scheduledAt) : null,
       isRecurring: recurrence.isRecurring,
       startDate: recurrence.startDate,
@@ -295,7 +338,13 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     const seriesRecurring = isRecurringSeries(existing);
     const occurrenceDate = seriesRecurring ? resolveOccurrenceDate(req.body, existing) : null;
     let occurrenceStatusRaw = req.body.occurrence_status;
-    if (occurrenceStatusRaw === undefined && seriesRecurring && occurrenceDate) {
+    // Drag & drop sends scheduledAt without occurrence fields — that is a schedule move,
+    // never an occurrence status update (otherwise scheduledAt below would be dropped).
+    const scheduleMoveOnly =
+      Object.prototype.hasOwnProperty.call(req.body, 'scheduledAt') &&
+      req.body.occurrence_status === undefined &&
+      !normalizeOccurrenceDate(req.body.occurrence_date);
+    if (occurrenceStatusRaw === undefined && seriesRecurring && occurrenceDate && !scheduleMoveOnly) {
       const bodyStatus = req.body.status;
       if (
         bodyStatus !== undefined &&
@@ -369,6 +418,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       status,
       title,
       notes,
+      memo,
       scheduledAt,
     } = req.body;
 
@@ -440,6 +490,9 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     if (notes !== undefined) {
       patch.notes = notes ? String(notes).trim() : '';
     }
+    if (memo !== undefined) {
+      patch.memo = memo ? String(memo).trim() : '';
+    }
 
     const occurrenceStatusOnly =
       seriesRecurring &&
@@ -481,6 +534,7 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
       patch.rrule = recurrence.rrule;
       patch.startDate = recurrence.startDate;
       if (seriesRecurring && !recurrence.isRecurring) {
+        patch.occurrenceOverrides = {};
         patch.exdates = [];
         patch.completedDates = [];
         patch.missedDates = [];
@@ -640,6 +694,316 @@ router.put('/:id', checkLessonCollision, async (req, res, next) => {
     res.json(updated);
   } catch (error) {
     next(error);
+  }
+});
+
+function dateFromDayKey(dayKey, anchor) {
+  const [y, m, d] = String(dayKey).slice(0, 10).split('-').map(Number);
+  const base = new Date(y, m - 1, d, 0, 0, 0, 0);
+  return anchor ? applyAnchorTime(base, anchor) : base;
+}
+
+function shiftDayKey(dayKey, days) {
+  const date = dateFromDayKey(dayKey, null);
+  date.setDate(date.getDate() + days);
+  return dayKeyFromDate(date);
+}
+
+function occurrenceIsMarked(lesson, occurrenceDate) {
+  return ['completedDates', 'missedDates', 'canceledDates'].some((field) =>
+    (lesson[field] ?? []).some((item) => String(item).slice(0, 10) === occurrenceDate),
+  );
+}
+
+/** Точечная проверка слота: пересечение нового времени с чужими scheduled-уроками. */
+async function slotHasCollision(tutorId, { scheduledAt, durationMinutes, excludeId }) {
+  const start = Date.parse(String(scheduledAt));
+  if (Number.isNaN(start)) {
+    return false;
+  }
+  const end = start + clampDuration(durationMinutes) * 60000;
+  const rangeStart = new Date(start - 7 * 86400000);
+  const rangeEnd = new Date(start + 7 * 86400000);
+  const snap = await fetchTutorLessonsForPeriod(tutorId, {
+    from: rangeStart,
+    to: rangeEnd,
+  });
+  for (const doc of snap.docs) {
+    if (doc.id === excludeId) {
+      continue;
+    }
+    const data = doc.data();
+    if (data.status !== 'scheduled') {
+      continue;
+    }
+    for (const other of lessonOccurrenceIntervals(data, rangeStart, rangeEnd)) {
+      if (Math.max(start, other.start) < Math.min(end, other.end)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function loadOwnedSeries(req, res) {
+  const lessonRef = db.collection('lessons').doc(req.params.id);
+  const lessonSnap = await lessonRef.get();
+  if (!lessonSnap.exists || lessonSnap.data().tutor !== req.user.id) {
+    res.status(404).json({ message: 'Lesson not found' });
+    return null;
+  }
+  const existing = lessonSnap.data();
+  if (!isRecurringSeries(existing) || !existing.rrule || !existing.scheduledAt) {
+    res.status(400).json({ message: 'Lesson is not a recurring series' });
+    return null;
+  }
+  return { lessonRef, existing };
+}
+
+/**
+ * Перенос одного вхождения без выхода из серии: пишем occurrenceOverrides[occurrence_date].
+ * Возврат вхождения на штатное время удаляет override.
+ */
+router.post('/:id/occurrence-move', async (req, res, next) => {
+  try {
+    const owned = await loadOwnedSeries(req, res);
+    if (!owned) {
+      return undefined;
+    }
+    const { lessonRef, existing } = owned;
+
+    const occurrenceDate = normalizeOccurrenceDate(req.body.occurrence_date);
+    if (!occurrenceDate) {
+      return res.status(400).json({ message: 'occurrence_date is required' });
+    }
+    const nextAt = new Date(req.body.scheduledAt);
+    if (Number.isNaN(nextAt.getTime())) {
+      return res.status(400).json({ message: 'scheduledAt is invalid' });
+    }
+
+    const anchor = new Date(existing.scheduledAt);
+    const overrides = normalizeOccurrenceOverrides(existing.occurrenceOverrides);
+    const naturalAt = dateFromDayKey(occurrenceDate, anchor).toISOString();
+    const previousAt = overrides[occurrenceDate]?.scheduledAt ?? naturalAt;
+
+    if (scheduleTimesEqual(previousAt, nextAt.toISOString())) {
+      return res.json(serializeDoc(await lessonRef.get()));
+    }
+
+    if (
+      await slotHasCollision(req.user.id, {
+        scheduledAt: nextAt.toISOString(),
+        durationMinutes: existing.lesson_duration,
+        excludeId: lessonRef.id,
+      })
+    ) {
+      return res.status(409).json({ error: 'Time slot collision' });
+    }
+
+    if (scheduleTimesEqual(naturalAt, nextAt.toISOString())) {
+      delete overrides[occurrenceDate];
+    } else {
+      overrides[occurrenceDate] = { scheduledAt: nextAt.toISOString() };
+    }
+
+    await lessonRef.update({
+      occurrenceOverrides: overrides,
+      reminder_sent: false,
+      post_lesson_notified: false,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const updated = serializeDoc(await lessonRef.get());
+    if (!occurrenceIsMarked(existing, occurrenceDate)) {
+      notifyLessonReschedule(
+        req.user.id,
+        { ...updated, scheduledAt: nextAt.toISOString() },
+        existing.student_id,
+        previousAt,
+      ).catch((err) => console.error('notifyLessonReschedule:', err.message));
+    }
+    return res.json(updated);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+/**
+ * Перенос серии: `following` режет серию с этого вхождения, `all` — с первого будущего,
+ * чтобы прошедшие занятия с их статусами и биллингом остались на прежних датах.
+ */
+router.post('/:id/series-move', async (req, res, next) => {
+  try {
+    const owned = await loadOwnedSeries(req, res);
+    if (!owned) {
+      return undefined;
+    }
+    const { lessonRef, existing } = owned;
+
+    const occurrenceDate = normalizeOccurrenceDate(req.body.occurrence_date);
+    if (!occurrenceDate) {
+      return res.status(400).json({ message: 'occurrence_date is required' });
+    }
+    const dropAt = new Date(req.body.scheduledAt);
+    if (Number.isNaN(dropAt.getTime())) {
+      return res.status(400).json({ message: 'scheduledAt is invalid' });
+    }
+    const scope = req.body.scope === 'all' ? 'all' : 'following';
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let splitFromKey;
+    if (scope === 'all') {
+      const firstFuture = firstOccurrenceOnOrAfter(existing, today);
+      splitFromKey = firstFuture ? dayKeyFromDate(firstFuture) : occurrenceDate;
+      if (splitFromKey > occurrenceDate) {
+        splitFromKey = occurrenceDate;
+      }
+    } else {
+      const dropKey = dayKeyFromDate(dropAt);
+      splitFromKey = dropKey < occurrenceDate ? dropKey : occurrenceDate;
+    }
+
+    const seriesStart = dateFromDayKey(existing.startDate ?? dayKeyFromDate(new Date(existing.scheduledAt)), null);
+    const pastDates = occurrenceDatesBetween(
+      existing,
+      seriesStart,
+      dateFromDayKey(shiftDayKey(splitFromKey, -1), null),
+    );
+    const originalCount = Number(parseRruleParts(existing.rrule).COUNT);
+    const remainingCount = Number.isNaN(originalCount)
+      ? null
+      : Math.max(1, originalCount - pastDates.length);
+    const nextRrule = withRruleTargetDay(
+      existing.rrule,
+      dropAt,
+      remainingCount,
+      dateFromDayKey(occurrenceDate, null),
+    );
+
+    // Для `all` серия начинается с первого будущего вхождения нового правила, для `following` — с точки drop.
+    let nextAnchor = dropAt;
+    if (scope === 'all') {
+      const probeFrom = dateFromDayKey(splitFromKey, dropAt);
+      const firstNew = firstOccurrenceOnOrAfter(
+        {
+          isRecurring: true,
+          rrule: nextRrule,
+          startDate: splitFromKey,
+          scheduledAt: probeFrom.toISOString(),
+        },
+        probeFrom,
+      );
+      nextAnchor = firstNew ? applyAnchorTime(firstNew, dropAt) : dropAt;
+    }
+
+    // Страховка: перенос не должен оставить серию без вхождений (иначе уроки исчезнут из календаря).
+    const movedPart = {
+      isRecurring: true,
+      rrule: nextRrule,
+      startDate: dayKeyFromDate(nextAnchor),
+      scheduledAt: nextAnchor.toISOString(),
+    };
+    console.log('[series-move]', {
+      lessonId: lessonRef.id,
+      scope,
+      occurrenceDate,
+      splitFromKey,
+      pastCount: pastDates.length,
+      fromRrule: existing.rrule,
+      nextRrule,
+      nextAnchor: nextAnchor.toISOString(),
+      firstOfMovedPart: String(firstOccurrenceOnOrAfter(movedPart, nextAnchor)),
+    });
+    if (!firstOccurrenceOnOrAfter(movedPart, nextAnchor)) {
+      return res.status(422).json({ message: 'Series move would leave no occurrences' });
+    }
+
+    if (
+      await slotHasCollision(req.user.id, {
+        scheduledAt: nextAnchor.toISOString(),
+        durationMinutes: existing.lesson_duration,
+        excludeId: lessonRef.id,
+      })
+    ) {
+      return res.status(409).json({ error: 'Time slot collision' });
+    }
+
+    const overrides = normalizeOccurrenceOverrides(existing.occurrenceOverrides);
+    const pastOverrides = Object.fromEntries(
+      Object.entries(overrides).filter(([key]) => key < splitFromKey),
+    );
+    const previousAt = overrides[occurrenceDate]?.scheduledAt
+      ?? dateFromDayKey(occurrenceDate, new Date(existing.scheduledAt)).toISOString();
+
+    const batch = db.batch();
+    let createdRef = null;
+
+    if (pastDates.length === 0) {
+      // Прошедших вхождений нет — переписываем серию на месте.
+      batch.update(lessonRef, {
+        scheduledAt: nextAnchor.toISOString(),
+        startDate: dayKeyFromDate(nextAnchor),
+        rrule: nextRrule,
+        isRecurring: true,
+        occurrenceOverrides: pastOverrides,
+        reminder_sent: false,
+        post_lesson_notified: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      batch.update(lessonRef, {
+        rrule: withRruleUntil(existing.rrule, shiftDayKey(splitFromKey, -1)),
+        occurrenceOverrides: pastOverrides,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      createdRef = db.collection('lessons').doc();
+      batch.set(createdRef, {
+        tutor: existing.tutor,
+        student_id: existing.student_id ?? null,
+        student_name: existing.student_name ?? null,
+        lesson_price: existing.lesson_price ?? 0,
+        lesson_currency: existing.lesson_currency ?? 'EUR',
+        price_mode: existing.price_mode ?? 'hourly',
+        student_timezone: existing.student_timezone ?? 'UTC',
+        lesson_duration: existing.lesson_duration ?? 60,
+        status: 'scheduled',
+        title: existing.title ?? '',
+        notes: existing.notes ?? '',
+        memo: existing.memo ?? '',
+        scheduledAt: nextAnchor.toISOString(),
+        isRecurring: true,
+        startDate: dayKeyFromDate(nextAnchor),
+        rrule: nextRrule,
+        exdates: [],
+        completedDates: [],
+        missedDates: [],
+        canceledDates: [],
+        occurrenceOverrides: {},
+        reminder_sent: false,
+        post_lesson_notified: false,
+        balance_debited: false,
+        billing_processed: false,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+
+    const master = serializeDoc(await lessonRef.get());
+    const created = createdRef ? serializeDoc(await createdRef.get()) : null;
+
+    notifyLessonReschedule(
+      req.user.id,
+      created ?? master,
+      existing.student_id,
+      previousAt,
+    ).catch((err) => console.error('notifyLessonReschedule:', err.message));
+
+    return res.json({ master, created });
+  } catch (error) {
+    return next(error);
   }
 });
 

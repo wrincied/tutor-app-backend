@@ -7,6 +7,7 @@ const {
   lessonTutorId,
   roundTenthPercent,
   FINANCE_ADOPTION_ACTIONS,
+  isCacheFresh,
 } = require('./adminDashboard');
 
 describe('isIncludedInKpi', () => {
@@ -16,9 +17,14 @@ describe('isIncludedInKpi', () => {
 
   it('excludes admin@ addresses even if include_in_kpi is true', () => {
     assert.equal(isAdminEmail('admin@simple4u.at'), true);
+    assert.equal(isAdminEmail('support@simple4u.at'), true);
     assert.equal(isAdminEmail('Admin@example.com'), true);
     assert.equal(
       isIncludedInKpi({ email: 'admin@simple4u.at', include_in_kpi: true }),
+      false,
+    );
+    assert.equal(
+      isIncludedInKpi({ email: 'support@simple4u.at', include_in_kpi: true }),
       false,
     );
   });
@@ -61,5 +67,15 @@ describe('activation percents', () => {
     assert.equal(FINANCE_ADOPTION_ACTIONS.has('student.topup'), true);
     assert.equal(FINANCE_ADOPTION_ACTIONS.has('student.balance_adjust'), true);
     assert.equal(FINANCE_ADOPTION_ACTIONS.has('expense.created'), true);
+  });
+});
+
+describe('admin dashboard cache freshness', () => {
+  it('is fresh within TTL and stale after', () => {
+    const now = 1_000_000;
+    const ttl = 5 * 60 * 1000;
+    assert.equal(isCacheFresh(now - 60_000, now, ttl), true);
+    assert.equal(isCacheFresh(now - ttl, now, ttl), false);
+    assert.equal(isCacheFresh(0, now, ttl), false);
   });
 });

@@ -1,6 +1,5 @@
 const { db, FieldValue } = require('../firebase');
 const { serializeDoc } = require('../utils/serialize');
-const { normalizeLessonStatus } = require('../utils/lessonSnapshot');
 const { applyLessonStatusBilling } = require('../services/lessonBilling');
 const {
   notifyLessonStart,
@@ -18,12 +17,51 @@ const {
 const { hasTelegramAccess, subscriptionLabel } = require('../utils/userProfile');
 const { expireEndedTrials } = require('../utils/trialExpiry');
 const { runBillingWorkerCycle } = require('../utils/billingWorker');
+const {
+  COMPLETE_BUFFER_MS,
+  REMIND_WINDOW_MS,
+  DAILY_LONG_REMINDER_EVERY_MS,
+  fetchCandidateScheduled,
+  fetchLongOffsetReminderCandidates,
+} = require('../utils/scheduledLessonCandidates');
 
-const COMPLETE_BUFFER_MS = 30 * 60 * 1000;
-const REMIND_WINDOW_MS = 90 * 1000; // ±1.5 мин вокруг отметки напоминания
 const TICK_MS = 60 * 1000;
 const TRIAL_EXPIRY_EVERY_MS = 60 * 60 * 1000;
-let lastTrialExpiryAt = 0;
+/** Recurring + delayed billing — soft timing (+30m buffers); keep reminders on TICK_MS. */
+const DEFAULT_HEAVY_TICK_MS = 10 * 60 * 1000;
+
+function resolveHeavyTickMs() {
+  const raw = Number(process.env.LESSON_WORKER_HEAVY_MS);
+  if (Number.isFinite(raw) && raw >= 60_000) {
+    return Math.floor(raw);
+  }
+  return DEFAULT_HEAVY_TICK_MS;
+}
+
+const HEAVY_TICK_MS = resolveHeavyTickMs();
+
+/** Persisted cadence for scale-to-zero / Scheduler wakes (not in-process RAM). */
+const WORKER_STATE_REF = () => db.collection('system').doc('lesson_worker');
+
+async function loadWorkerState() {
+  const snap = await WORKER_STATE_REF().get();
+  const data = snap.exists ? snap.data() || {} : {};
+  return {
+    lastHeavyAt: Number(data.lastHeavyAt) || 0,
+    lastTrialExpiryAt: Number(data.lastTrialExpiryAt) || 0,
+    lastLongOffsetReminderAt: Number(data.lastLongOffsetReminderAt) || 0,
+  };
+}
+
+async function saveWorkerState(partial) {
+  await WORKER_STATE_REF().set(
+    {
+      ...partial,
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
 
 /** tutorId → subscription status (refreshed per tick). */
 const tutorPlanCache = new Map();
@@ -80,12 +118,12 @@ async function canNotifyTutorStudent(tutorId, student) {
 /**
  * Напоминание за N минут до старта (N из telegram_notification_settings ученика;
  * подпись времени — в timezone репетитора).
+ * @param {FirebaseFirestore.QueryDocumentSnapshot[]} docs prefetched candidates
  */
-async function processReminders(now = Date.now()) {
-  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
+async function processReminders(docs, now = Date.now()) {
   let sent = 0;
 
-  for (const doc of snap.docs) {
+  for (const doc of docs) {
     const lesson = { _id: doc.id, ...doc.data() };
     if (lesson.reminder_sent === true) {
       continue;
@@ -150,12 +188,12 @@ async function processReminders(now = Date.now()) {
 /**
  * Через 30 минут после окончания одиночного урока → completed + списание + TG.
  * Recurring обрабатывает billingWorker (completedDates).
+ * @param {FirebaseFirestore.QueryDocumentSnapshot[]} docs prefetched candidates
  */
-async function processAutoComplete(now = Date.now()) {
-  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
+async function processAutoComplete(docs, now = Date.now()) {
   let completed = 0;
 
-  for (const doc of snap.docs) {
+  for (const doc of docs) {
     const lesson = { _id: doc.id, ...doc.data() };
     if (lesson.isRecurring === true || lesson.rrule) {
       continue;
@@ -254,31 +292,96 @@ async function processAutoComplete(now = Date.now()) {
   return completed;
 }
 
-async function tick() {
-  try {
-    tutorPlanCache.clear();
-    const now = Date.now();
-    if (now - lastTrialExpiryAt >= TRIAL_EXPIRY_EVERY_MS) {
-      lastTrialExpiryAt = now;
-      const expired = await expireEndedTrials(db, FieldValue);
-      if (expired > 0) {
-        console.log(`[lessonBotNotify] expired ${expired} admin trial(s)`);
-      }
-    }
-    const reminded = await processReminders();
-    const done = await processAutoComplete();
-    // Recurring + delayed debit for completed&unprocessed (no second single auto-complete).
-    const billing = await runBillingWorkerCycle({ autoCompleteSingles: false });
-    if (reminded || done || billing.autoRecurring || billing.recurringBilled || billing.dueBilled) {
-      console.log(
-        `[lessonBotNotify] reminders=${reminded} autoComplete=${done}` +
-          ` recurringDone=${billing.autoRecurring} recurringBilled=${billing.recurringBilled}` +
-          ` delayedBilled=${billing.dueBilled}`,
-      );
-    }
-  } catch (err) {
-    console.error('[lessonBotNotify] tick failed:', err.message || err);
+/**
+ * One worker cycle (reminders / auto-complete / optional heavy billing).
+ * Cadence timestamps live in Firestore `system/lesson_worker` so Scheduler + min=0 works.
+ */
+async function runLessonBotNotifyTick() {
+  tutorPlanCache.clear();
+  const now = Date.now();
+  const state = await loadWorkerState();
+
+  const runHeavy = now - state.lastHeavyAt >= HEAVY_TICK_MS;
+  const runTrialExpiry = now - state.lastTrialExpiryAt >= TRIAL_EXPIRY_EVERY_MS;
+  const runLongOffset = now - state.lastLongOffsetReminderAt >= DAILY_LONG_REMINDER_EVERY_MS;
+
+  const nextState = { ...state };
+  if (runHeavy) {
+    nextState.lastHeavyAt = now;
   }
+
+  let expiredTrials = 0;
+  if (runTrialExpiry) {
+    nextState.lastTrialExpiryAt = now;
+    expiredTrials = await expireEndedTrials(db, FieldValue);
+    if (expiredTrials > 0) {
+      console.log(`[lessonBotNotify] expired ${expiredTrials} admin trial(s)`);
+    }
+  }
+
+  const candidates = await fetchCandidateScheduled(now);
+  let reminderDocs = candidates.docs;
+
+  let longOffset = null;
+  if (runLongOffset) {
+    nextState.lastLongOffsetReminderAt = now;
+    longOffset = await fetchLongOffsetReminderCandidates(now);
+    if (longOffset.size > 0) {
+      const seen = new Set(reminderDocs.map((d) => d.id));
+      reminderDocs = reminderDocs.concat(longOffset.docs.filter((d) => !seen.has(d.id)));
+    }
+  }
+
+  console.log(
+    `[lessonBotNotify] tick=${runHeavy ? 'heavy' : 'light'}` +
+      ` candidates=${candidates.size} fetchMs=${candidates.fetchMs}` +
+      (longOffset
+        ? ` longOffset=${longOffset.size} longFetchMs=${longOffset.fetchMs}`
+        : ''),
+  );
+
+  const reminded = await processReminders(reminderDocs, now);
+  const done = await processAutoComplete(candidates.docs, now);
+
+  let billing = {
+    autoRecurring: 0,
+    recurringBilled: 0,
+    dueBilled: 0,
+  };
+  if (runHeavy) {
+    billing = await runBillingWorkerCycle({ autoCompleteSingles: false });
+  }
+
+  await saveWorkerState(nextState);
+
+  if (reminded || done || billing.autoRecurring || billing.recurringBilled || billing.dueBilled) {
+    console.log(
+      `[lessonBotNotify] reminders=${reminded} autoComplete=${done}` +
+        ` recurringDone=${billing.autoRecurring} recurringBilled=${billing.recurringBilled}` +
+        ` delayedBilled=${billing.dueBilled}`,
+    );
+  }
+
+  return {
+    mode: runHeavy ? 'heavy' : 'light',
+    candidates: candidates.size,
+    reminded,
+    autoComplete: done,
+    expiredTrials,
+    ...billing,
+  };
+}
+
+/** @deprecated use runLessonBotNotifyTick — kept for older call sites / logs */
+async function tick() {
+  return runLessonBotNotifyTick();
+}
+
+function schedulerModeEnabled() {
+  const mode = String(process.env.LESSON_BOT_NOTIFY_MODE || '')
+    .trim()
+    .toLowerCase();
+  return mode === 'scheduler' || mode === 'http';
 }
 
 function startLessonBotNotifyWorker() {
@@ -286,13 +389,28 @@ function startLessonBotNotifyWorker() {
     console.log('[lessonBotNotify] disabled via LESSON_BOT_NOTIFY_DISABLED');
     return null;
   }
-  console.log('[lessonBotNotify] started (every 60s, remind=per-student offset, complete=+30m after end)');
-  void tick();
-  return setInterval(() => void tick(), TICK_MS);
+  if (schedulerModeEnabled()) {
+    console.log(
+      '[lessonBotNotify] scheduler mode — in-process interval off;' +
+        ' wake via POST /api/internal/lesson-worker/tick',
+    );
+    return null;
+  }
+  console.log(
+    `[lessonBotNotify] started (light every ${TICK_MS / 1000}s: reminders+singles;` +
+      ` heavy every ${HEAVY_TICK_MS / 1000}s: recurring+delayed billing)`,
+  );
+  const safeTick = () =>
+    void runLessonBotNotifyTick().catch((err) => {
+      console.error('[lessonBotNotify] tick failed:', err.message || err);
+    });
+  safeTick();
+  return setInterval(safeTick, TICK_MS);
 }
 
 module.exports = {
   startLessonBotNotifyWorker,
+  runLessonBotNotifyTick,
   processReminders,
   processAutoComplete,
 };

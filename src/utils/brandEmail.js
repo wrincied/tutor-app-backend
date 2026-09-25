@@ -1,10 +1,10 @@
 /**
  * Brand domain (@simple4u.at): registration blocked except explicit whitelist.
- * Default whitelist: admin@simple4u.at (override via BRAND_EMAIL_WHITELIST / ADMIN_EMAILS).
+ * Default whitelist: support@simple4u.at (override via BRAND_EMAIL_WHITELIST / ADMIN_EMAILS).
  */
 
 const DEFAULT_PROTECTED_DOMAINS = ['simple4u.at'];
-const DEFAULT_WHITELIST = ['admin@simple4u.at'];
+const DEFAULT_WHITELIST = ['support@simple4u.at'];
 
 function normalizeEmail(email) {
   return String(email ?? '')
@@ -39,7 +39,12 @@ function brandEmailWhitelist() {
     process.env.ADMIN_EMAILS ||
     process.env.ADMIN_ALLOWLIST_EMAILS ||
     '';
-  return new Set(parseCsvList(raw, DEFAULT_WHITELIST));
+  const set = new Set(parseCsvList(raw, DEFAULT_WHITELIST));
+  // Product support inbox must stay reachable even if ADMIN_EMAILS overrides omit it.
+  for (const email of DEFAULT_WHITELIST) {
+    set.add(email);
+  }
+  return set;
 }
 
 function isProtectedBrandDomain(email) {
@@ -67,7 +72,11 @@ function adminEmailAllowlist() {
     process.env.ADMIN_ALLOWLIST_EMAILS ||
     process.env.BRAND_EMAIL_WHITELIST ||
     '';
-  return new Set(parseCsvList(raw, DEFAULT_WHITELIST));
+  const set = new Set(parseCsvList(raw, DEFAULT_WHITELIST));
+  for (const email of DEFAULT_WHITELIST) {
+    set.add(email);
+  }
+  return set;
 }
 
 function isAdminAllowlistedEmail(email) {

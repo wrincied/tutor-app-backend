@@ -19,8 +19,18 @@ function uniqueDates(list) {
 }
 
 async function occurrenceBalanceDebited(lessonId, occurrenceDate) {
-  const snap = await db.collection('balance_logs').where('lessonId', '==', lessonId).limit(100).get();
-  return snap.docs.some((doc) => String(doc.data().occurrenceDate ?? '').slice(0, 10) === occurrenceDate);
+  const date = String(occurrenceDate || '').slice(0, 10);
+  if (!lessonId || !date) {
+    return false;
+  }
+  // Requires composite index (lessonId, occurrenceDate) — deploy indexes before this query.
+  const snap = await db
+    .collection('balance_logs')
+    .where('lessonId', '==', lessonId)
+    .where('occurrenceDate', '==', date)
+    .limit(1)
+    .get();
+  return !snap.empty;
 }
 
 function appendBalanceLogEntry(batch, {
@@ -62,7 +72,7 @@ function debitPackageOccurrence(batch, {
   occurrenceDate,
   amount = 1,
   currentBalance,
-  allowNegative = false,
+  allowNegative = true,
   reason = 'lesson_completed_occurrence',
 }) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
@@ -71,6 +81,7 @@ function debitPackageOccurrence(batch, {
   const safeCurrent = hasCurrent ? current : 0;
 
   if (allowNegative) {
+    const next = Math.round((safeCurrent - units) * 100) / 100;
     batch.update(studentRef, {
       balance_lessons: FieldValue.increment(-units),
       updatedAt: FieldValue.serverTimestamp(),
@@ -85,9 +96,11 @@ function debitPackageOccurrence(batch, {
       occurrenceDate,
     });
     batch.update(lessonRef, {
+      // Negative package balance = debt; keep unpaid flag until top-up settles FIFO.
+      unpaid_debt: next < 0,
       updatedAt: FieldValue.serverTimestamp(),
     });
-    return { debited: true, amount: units };
+    return { debited: true, amount: units, unpaidDebt: next < 0 };
   }
 
   const available = Math.max(0, safeCurrent);
@@ -161,6 +174,10 @@ function debitPostpaidOccurrence(batch, {
     updatedAt: FieldValue.serverTimestamp(),
   });
   batch.update(lessonRef, {
+    billing_processed: true,
+    balance_debited: false,
+    unpaid_debt: true,
+    settled_by_payment_at: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
   });
   appendBalanceLogEntry(batch, {
@@ -217,10 +234,13 @@ function occurrenceEndMs(lesson, occurrenceDate) {
   const [y, m, d] = occurrenceDate.split('-').map(Number);
   const dayStart = new Date(y, m - 1, d, 0, 0, 0, 0);
   const dayEnd = new Date(y, m - 1, d, 23, 59, 59, 999);
-  const intervals = lessonOccurrenceIntervals(lesson, dayStart, dayEnd);
-  const match = intervals.find(
-    (interval) => dayKeyFromDate(new Date(interval.start)) === occurrenceDate,
-  );
+  // Перенесённое вхождение может уехать на другой день, поэтому ищем с запасом по ключу.
+  const searchStart = new Date(dayStart);
+  searchStart.setDate(searchStart.getDate() - 7);
+  const searchEnd = new Date(dayEnd);
+  searchEnd.setDate(searchEnd.getDate() + 7);
+  const intervals = lessonOccurrenceIntervals(lesson, searchStart, searchEnd);
+  const match = intervals.find((interval) => interval.occurrenceDate === occurrenceDate);
   if (match) {
     return match.end;
   }
@@ -651,18 +671,26 @@ async function excludeRecurringOccurrence({ tutorId, lessonRef, existing, occurr
   return { excluded: true, occurrenceDate };
 }
 
-async function autoCompletePastRecurringOccurrences(now = Date.now()) {
+/**
+ * @param {number} [now]
+ * @param {FirebaseFirestore.QueryDocumentSnapshot[]} [docs] prefetched isRecurring lessons
+ */
+async function autoCompletePastRecurringOccurrences(now = Date.now(), docs = null) {
   const rangeEnd = new Date(now);
   const rangeStart = new Date(now);
   rangeStart.setDate(rangeStart.getDate() - 90);
 
-  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
+  const list =
+    docs ??
+    (await db.collection('lessons').where('isRecurring', '==', true).get()).docs;
   let completed = 0;
 
-  for (const doc of snap.docs) {
+  for (const doc of list) {
     const existing = doc.data();
-    const recurring = existing.isRecurring === true || Boolean(existing.rrule);
-    if (!recurring || !existing.rrule || !existing.student_id) {
+    if (existing.status && existing.status !== 'scheduled') {
+      continue;
+    }
+    if (!existing.rrule || !existing.student_id) {
       continue;
     }
 
@@ -673,7 +701,7 @@ async function autoCompletePastRecurringOccurrences(now = Date.now()) {
       if (interval.end > now) {
         continue;
       }
-      const occurrenceDate = dayKeyFromDate(new Date(interval.start));
+      const occurrenceDate = interval.occurrenceDate ?? dayKeyFromDate(new Date(interval.start));
       if (completedDates.includes(occurrenceDate)) {
         continue;
       }
@@ -704,14 +732,19 @@ async function autoCompletePastRecurringOccurrences(now = Date.now()) {
   return { completed };
 }
 
-async function billDueRecurringOccurrences(now = Date.now()) {
-  const snap = await db.collection('lessons').get();
+/**
+ * @param {number} [now]
+ * @param {FirebaseFirestore.QueryDocumentSnapshot[]} [docs] prefetched isRecurring lessons
+ */
+async function billDueRecurringOccurrences(now = Date.now(), docs = null) {
+  const list =
+    docs ??
+    (await db.collection('lessons').where('isRecurring', '==', true).get()).docs;
   let debited = 0;
 
-  for (const doc of snap.docs) {
+  for (const doc of list) {
     const existing = doc.data();
-    const recurring = existing.isRecurring === true || Boolean(existing.rrule);
-    if (!recurring || !existing.student_id) {
+    if (!existing.student_id) {
       continue;
     }
 

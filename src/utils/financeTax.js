@@ -13,8 +13,8 @@ const AUSTRIAN_INCOME_TAX_BRACKETS = [
 ];
 
 /**
- * Упрощённая шкала немецкого ESt (оценка для Kleinunternehmer).
- * Grundfreibetrag ~11_604, затем 14%…42% — грубая аппроксимация сегментами.
+ * Упрощённая шкала немецкого ESt — оставлена для тестов legacy-формулы,
+ * режим DE в продукте отключён.
  */
 const GERMAN_INCOME_TAX_BRACKETS = [
   { limit: 11604, rate: 0.0 },
@@ -26,7 +26,6 @@ const GERMAN_INCOME_TAX_BRACKETS = [
 
 const DEFAULT_SOCIAL_INSURANCE_RATE = 0.1812;
 const DE_SOLIDARITY_SURCHARGE_RATE = 0.055;
-const PL_RYCZALT_RATE = 0.085;
 const RU_USN_RATE = 0.06;
 /** BY ИП — подоходный налог с прибыли (оценка 20%). */
 const BY_IP_RATE = 0.2;
@@ -143,20 +142,6 @@ function computeTaxProjection(taxMode, { grossProfit = 0, totalIncome = 0 } = {}
       const at = computeAustriaSelfEmployedProjection(gross);
       return projectionResult({ mode, ...at });
     }
-    case 'de-kleinunternehmer': {
-      const taxableBase = Math.max(0, gross);
-      const incomeTax = germanIncomeTax(taxableBase);
-      return projectionResult({
-        mode,
-        socialInsuranceRate: 0,
-        socialInsurance: 0,
-        taxableBase,
-        incomeTax,
-        netProfit: gross - incomeTax,
-      });
-    }
-    case 'pl-ryczalt':
-      return flatRevenueTax(mode, PL_RYCZALT_RATE, gross, income);
     case 'ru-usn':
     case 'ru-ip':
       return flatRevenueTax(mode, RU_USN_RATE, gross, income);
@@ -178,7 +163,6 @@ module.exports = {
   GERMAN_INCOME_TAX_BRACKETS,
   DEFAULT_SOCIAL_INSURANCE_RATE,
   DE_SOLIDARITY_SURCHARGE_RATE,
-  PL_RYCZALT_RATE,
   RU_USN_RATE,
   BY_IP_RATE,
   BY_SELF_EMPLOYED_RATE,

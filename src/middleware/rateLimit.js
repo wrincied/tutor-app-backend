@@ -40,7 +40,8 @@ function skipWebhooks(req) {
   return (
     path.startsWith('/api/billing/webhook') ||
     path.startsWith('/api/billing/tribute-webhook') ||
-    path.startsWith('/api/bot')
+    path.startsWith('/api/bot') ||
+    path.startsWith('/api/internal/')
   );
 }
 
@@ -93,6 +94,19 @@ function healthLimiter() {
   });
 }
 
+/**
+ * Heavy Firestore-backed reads (finance summary, lessons list).
+ * Keyed by authenticated user — caps self-spam / stolen-session burn.
+ * Must run after `auth` so req.user.id is set.
+ */
+function heavyReadLimiter() {
+  return createRateLimiter({
+    windowMs: 60 * 1000,
+    max: 40,
+    keyFn: (req) => req.user?.id || clientIp(req),
+  });
+}
+
 module.exports = {
   clientIp,
   createRateLimiter,
@@ -103,4 +117,5 @@ module.exports = {
   contactLimiter,
   checkoutLimiter,
   healthLimiter,
+  heavyReadLimiter,
 };

@@ -7,7 +7,7 @@ const {
 const EARLY_YEARLY_EUR = 59.99;
 const STANDARD_YEARLY_EUR = 99.99;
 const REFERRAL_PERCENT = 20;
-const TRIAL_DAYS = 7;
+const TRIAL_DAYS = 14;
 
 function roundMoney(amount) {
   return Math.round((Number(amount) || 0) * 100) / 100;

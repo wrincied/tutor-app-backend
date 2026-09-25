@@ -55,8 +55,6 @@ function getPlanPricing(plan, country) {
 
 const PRICING_TAX_MODES = new Set([
   'at-self-employed',
-  'de-kleinunternehmer',
-  'pl-ryczalt',
   'ru-usn',
   'ru-ip',
   'by-ip',
@@ -76,7 +74,7 @@ function normalizeTaxModeForPricing(raw) {
   return value;
 }
 
-/** ISO country from tax_mode prefix (e.g. pl-ryczalt → PL). */
+/** ISO country from tax_mode prefix (e.g. ru-usn → RU). */
 function countryFromTaxMode(raw) {
   const mode = normalizeTaxModeForPricing(raw);
   if (!PRICING_TAX_MODES.has(mode)) {

@@ -1,8 +1,94 @@
 const { subscriptionLabel } = require('./userProfile');
 const { getPlanPricing, getSubscriptionPricing, resolvePricingCountry } = require('./subscriptionPricing');
 const { serializeDoc, serializeQuerySnapshot } = require('./serialize');
+const { FieldValue } = require('../firebase');
 
 const MS_DAY = 24 * 60 * 60 * 1000;
+/** Avoid full-collection scans on every admin overview reload (Cloud Run min=0 cold starts too). */
+const ADMIN_DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
+const ADMIN_DASHBOARD_CACHE_DOC = 'admin_dashboard_cache';
+const ADMIN_USERS_CACHE_DOC = 'admin_users_cache';
+
+/** @type {Map<string, { at: number, payload: unknown }>} */
+const memoryCache = new Map();
+
+function isCacheFresh(builtAtMs, nowMs = Date.now(), ttlMs = ADMIN_DASHBOARD_CACHE_TTL_MS) {
+  const at = Number(builtAtMs) || 0;
+  return at > 0 && nowMs - at < ttlMs;
+}
+
+async function readSystemPayloadCache(db, docId, ttlMs = ADMIN_DASHBOARD_CACHE_TTL_MS) {
+  const now = Date.now();
+  const mem = memoryCache.get(docId);
+  if (mem && isCacheFresh(mem.at, now, ttlMs)) {
+    return { hit: true, source: 'memory', payload: mem.payload, builtAtMs: mem.at };
+  }
+
+  const snap = await db.collection('system').doc(docId).get();
+  if (!snap.exists) {
+    return { hit: false, source: null, payload: null, builtAtMs: 0 };
+  }
+  const data = snap.data() || {};
+  const builtAtMs = Number(data.builtAtMs) || 0;
+  if (!isCacheFresh(builtAtMs, now, ttlMs) || data.payload == null) {
+    return { hit: false, source: null, payload: null, builtAtMs };
+  }
+  memoryCache.set(docId, { at: builtAtMs, payload: data.payload });
+  return { hit: true, source: 'firestore', payload: data.payload, builtAtMs };
+}
+
+async function writeSystemPayloadCache(db, docId, payload) {
+  const builtAtMs = Date.now();
+  memoryCache.set(docId, { at: builtAtMs, payload });
+  await db.collection('system').doc(docId).set({
+    builtAtMs,
+    payload,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  return builtAtMs;
+}
+
+async function invalidateSystemPayloadCache(db, docIds) {
+  const ids = Array.isArray(docIds) ? docIds : [docIds];
+  await Promise.all(
+    ids.map(async (docId) => {
+      memoryCache.delete(docId);
+      try {
+        await db.collection('system').doc(docId).delete();
+      } catch {
+        // best-effort; next read rebuilds
+      }
+    }),
+  );
+}
+
+async function invalidateAdminOverviewCaches(db) {
+  await invalidateSystemPayloadCache(db, [ADMIN_DASHBOARD_CACHE_DOC, ADMIN_USERS_CACHE_DOC]);
+}
+
+async function getCachedAdminDashboard(db, { force = false } = {}) {
+  if (!force) {
+    const cached = await readSystemPayloadCache(db, ADMIN_DASHBOARD_CACHE_DOC);
+    if (cached.hit) {
+      return cached.payload;
+    }
+  }
+  const payload = await buildAdminDashboard(db);
+  await writeSystemPayloadCache(db, ADMIN_DASHBOARD_CACHE_DOC, payload);
+  return payload;
+}
+
+async function getCachedAdminUsersPayload(db, buildUsers, { force = false } = {}) {
+  if (!force) {
+    const cached = await readSystemPayloadCache(db, ADMIN_USERS_CACHE_DOC);
+    if (cached.hit && Array.isArray(cached.payload)) {
+      return cached.payload;
+    }
+  }
+  const payload = await buildUsers();
+  await writeSystemPayloadCache(db, ADMIN_USERS_CACHE_DOC, payload);
+  return payload;
+}
 
 const FINANCE_ADOPTION_ACTIONS = new Set([
   'expense.created',
@@ -15,7 +101,14 @@ const FINANCE_ADOPTION_ACTIONS = new Set([
 ]);
 
 function isAdminEmail(email) {
-  return /^admin@/i.test(String(email || '').trim());
+  const normalized = String(email || '')
+    .trim()
+    .toLowerCase();
+  return (
+    normalized === 'support@simple4u.at' ||
+    normalized === 'admin@simple4u.at' ||
+    /^admin@/i.test(normalized)
+  );
 }
 
 /**
@@ -432,12 +525,19 @@ function normalizeDashboardWidgets(raw) {
 
 module.exports = {
   buildAdminDashboard,
+  getCachedAdminDashboard,
+  getCachedAdminUsersPayload,
+  invalidateAdminOverviewCaches,
+  isCacheFresh,
   isIncludedInKpi,
   isAdminEmail,
   expenseTutorId,
   lessonTutorId,
   roundTenthPercent,
   FINANCE_ADOPTION_ACTIONS,
+  ADMIN_DASHBOARD_CACHE_TTL_MS,
+  ADMIN_DASHBOARD_CACHE_DOC,
+  ADMIN_USERS_CACHE_DOC,
   DEFAULT_DASHBOARD_WIDGETS,
   ALLOWED_DASHBOARD_WIDGETS,
   normalizeDashboardWidgets,

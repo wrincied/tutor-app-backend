@@ -110,6 +110,22 @@ function lessonScheduledRevenueForStatus(lessonData, status) {
   return lessonRevenueFromSnapshot(lessonData);
 }
 
+/** True when lesson already has a complete price/timezone snapshot (no student join needed). */
+function lessonHasCompleteSnapshot(lesson) {
+  const priceNum = Number(lesson.lesson_price);
+  const hasValidPrice =
+    lesson.lesson_price !== undefined &&
+    lesson.lesson_price !== null &&
+    !Number.isNaN(priceNum) &&
+    priceNum > 0;
+  return (
+    hasValidPrice &&
+    Boolean(lesson.lesson_currency) &&
+    Boolean(lesson.student_timezone) &&
+    Boolean(lesson.price_mode)
+  );
+}
+
 function enrichLessonSnapshot(lesson, studentById) {
   const priceNum = Number(lesson.lesson_price);
   const hasValidPrice =
@@ -160,5 +176,6 @@ module.exports = {
   lessonScheduledRevenueFromSnapshot,
   lessonIncomeForStatus,
   lessonScheduledRevenueForStatus,
+  lessonHasCompleteSnapshot,
   enrichLessonSnapshot,
 };

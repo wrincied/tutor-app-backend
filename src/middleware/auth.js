@@ -1,6 +1,6 @@
 const { admin } = require('../firebase');
 const { isDisposableEmail } = require('../utils/disposableEmailDomain');
-const { isBlockedBrandEmail } = require('../utils/brandEmail');
+const { isBlockedBrandEmail, isAdminAllowlistedEmail } = require('../utils/brandEmail');
 
 async function auth(req, res, next) {
   const header = req.headers.authorization;
@@ -18,7 +18,8 @@ async function auth(req, res, next) {
         message: 'Disposable email domains are not allowed',
       });
     }
-    if (isBlockedBrandEmail(decoded.email)) {
+    // Brand domain reserved for signup only — never block admin allowlist (support@).
+    if (isBlockedBrandEmail(decoded.email) && !isAdminAllowlistedEmail(decoded.email)) {
       return res.status(403).json({
         message: 'This email is already registered',
         code: 'BRAND_EMAIL_RESERVED',

@@ -7,6 +7,10 @@ const {
   billDueRecurringOccurrences,
 } = require('../services/lessonOccurrence');
 const { notifyLowPackageBalanceIfNeeded } = require('./lowBalanceNotify');
+const {
+  fetchAutoCompleteSingleCandidates,
+  fetchRecurringLessons,
+} = require('./scheduledLessonCandidates');
 
 const BUFFER_MS = LESSON_BILLING_BUFFER_MS;
 const BILLING_TICK_MS = 10 * 60 * 1000;
@@ -128,6 +132,13 @@ async function processLessonInTransaction(lessonId) {
     const studentRef = db.collection('students').doc(studentId);
     const studentSnap = await tx.get(studentRef);
     if (!studentSnap.exists) {
+      // Otherwise these stay in completed+!billing_processed forever and burn a tick every minute.
+      tx.update(lessonRef, {
+        billing_processed: true,
+        billing_processed_at: FieldValue.serverTimestamp(),
+        balance_debited: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
       return null;
     }
 
@@ -170,6 +181,17 @@ async function processLessonInTransaction(lessonId) {
     if (billingUpdate.balanceUnitsDebited != null && billingUpdate.balanceUnitsDebited > 0) {
       lessonPatch.balance_units_debited = billingUpdate.balanceUnitsDebited;
     }
+    if (billingUpdate.billingType === 'postpaid') {
+      lessonPatch.unpaid_debt = true;
+      lessonPatch.settled_by_payment_at = FieldValue.delete();
+    } else if (
+      billingUpdate.billingType === 'package' &&
+      billingUpdate.studentPatch.balance_lessons != null &&
+      billingUpdate.studentPatch.balance_lessons < 0
+    ) {
+      lessonPatch.unpaid_debt = true;
+      lessonPatch.settled_by_payment_at = FieldValue.delete();
+    }
     tx.update(lessonRef, lessonPatch);
 
     if (
@@ -208,10 +230,11 @@ function lessonEndMs(lesson) {
  * Kept for fallback when LESSON_BOT_NOTIFY_DISABLED=1.
  */
 async function autoCompletePastSingleLessons(now = Date.now()) {
-  const snap = await db.collection('lessons').where('status', '==', 'scheduled').get();
+  // Narrow range query (status + scheduledAt); recurring stays on full scan until Phase 3.
+  const { docs } = await fetchAutoCompleteSingleCandidates(now);
   let count = 0;
 
-  for (const doc of snap.docs) {
+  for (const doc of docs) {
     const lesson = doc.data();
     if (lesson.isRecurring === true || lesson.rrule) {
       continue;
@@ -244,8 +267,16 @@ async function runBillingWorkerCycle(options = {}) {
   const autoSingle = autoCompleteSingles
     ? await autoCompletePastSingleLessons(now)
     : { count: 0 };
-  const autoRecurring = await autoCompletePastRecurringOccurrences(now);
-  const recurringBilled = await billDueRecurringOccurrences(now);
+
+  // One fetch for both recurring paths (was: all scheduled + entire lessons collection).
+  const recurring = await fetchRecurringLessons();
+  if (recurring.size > 0 || recurring.fetchMs > 50) {
+    console.info(
+      `[billingWorker] recurringCandidates=${recurring.size} fetchMs=${recurring.fetchMs}`,
+    );
+  }
+  const autoRecurring = await autoCompletePastRecurringOccurrences(now, recurring.docs);
+  const recurringBilled = await billDueRecurringOccurrences(now, recurring.docs);
 
   const snap = await db
     .collection('lessons')

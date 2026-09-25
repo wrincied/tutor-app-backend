@@ -37,7 +37,7 @@ const { resolveCheckoutOffer } = require('../utils/checkoutOffer');
 const router = express.Router();
 
 /** Pro free trial length for Stripe Checkout subscriptions. */
-const PRO_TRIAL_DAYS = 7;
+const PRO_TRIAL_DAYS = 14;
 
 /**
  * Stripe Checkout URLs die after expiry or completion. A static idempotency
@@ -445,7 +445,7 @@ router.get('/payment-options', billingAuth, async (req, res, next) => {
         !allowedProviders.includes('tribute'),
       tributeReady,
       stripeReady,
-      trialDays: plan === 'pro' ? (provider === 'tribute' ? 7 : PRO_TRIAL_DAYS) : 0,
+      trialDays: plan === 'pro' ? PRO_TRIAL_DAYS : 0,
     });
   } catch (error) {
     next(error);
@@ -667,7 +667,7 @@ router.post('/tribute/checkout-session', billingAuth, limitCheckout, async (req,
       url,
       provider: 'tribute',
       plan,
-      trialDays: plan === 'pro' ? 7 : 0,
+      trialDays: plan === 'pro' ? PRO_TRIAL_DAYS : 0,
       orderUuid: order.uuid || null,
     });
   } catch (error) {

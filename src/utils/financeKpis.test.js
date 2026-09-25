@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeTaxProjection, PL_RYCZALT_RATE, RU_USN_RATE } = require('./financeTax');
+const { computeTaxProjection, RU_USN_RATE } = require('./financeTax');
 const {
   lessonIncomeFromSnapshot,
   lessonScheduledRevenueFromSnapshot,
@@ -101,15 +101,12 @@ describe('finance KPIs: Income, Expenses, Gross, Net', () => {
     assert.ok(kpis.netProfit < kpis.grossProfit);
   });
 
-  it('PL / RU / BY / KZ modes each return a net estimate', () => {
+  it('RU / BY / KZ / UA modes each return a net estimate', () => {
     const base = {
       completedLessons: [{ lesson_price: 10000, lesson_duration: 60 }],
       scheduledLessons: [],
       expenses: [1000],
     };
-    const pl = computeFinanceKpis({ ...base, taxMode: 'pl-ryczalt' });
-    assert.equal(pl.incomeTax, 10000 * PL_RYCZALT_RATE);
-    assert.equal(pl.netProfit, 9000 - 10000 * PL_RYCZALT_RATE);
 
     const ru = computeFinanceKpis({ ...base, taxMode: 'ru-usn' });
     assert.equal(ru.incomeTax, 10000 * RU_USN_RATE);
@@ -122,15 +119,15 @@ describe('finance KPIs: Income, Expenses, Gross, Net', () => {
     assert.equal(kz.tax.mode, 'kz-ip');
     assert.ok(kz.netProfit < kz.grossProfit);
 
-    const de = computeFinanceKpis({
-      completedLessons: [{ lesson_price: 30000, lesson_duration: 60 }],
-      scheduledLessons: [],
-      expenses: [1000],
-      taxMode: 'de-kleinunternehmer',
-    });
-    assert.equal(de.socialInsurance, 0);
-    assert.ok(de.incomeTax > 0);
-    assert.ok(de.netProfit < de.grossProfit);
+    const ua = computeFinanceKpis({ ...base, taxMode: 'ua-fop3' });
+    assert.equal(ua.tax.mode, 'ua-fop3');
+    assert.ok(ua.netProfit < ua.grossProfit);
+
+    assert.equal(
+      computeFinanceKpis({ ...base, taxMode: 'de-kleinunternehmer' }).tax,
+      null,
+    );
+    assert.equal(computeFinanceKpis({ ...base, taxMode: 'pl-ryczalt' }).tax, null);
   });
 
   it('hourly lessons scale income by duration before Gross/Net', () => {

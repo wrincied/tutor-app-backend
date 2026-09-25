@@ -386,11 +386,10 @@ const HTML = `<!doctype html>
       <label for="taxMode">Налоговый режим</label>
       <select id="taxMode" style="width:100%;margin-bottom:0.75rem;padding:0.5rem;border:1px solid var(--line);border-radius:8px;">
         <option value="at-self-employed">AT — self-employed</option>
-        <option value="de-kleinunternehmer">DE — Kleinunternehmer</option>
-        <option value="pl-ryczalt">PL — ryczałt</option>
         <option value="ru-usn">RU — УСН</option>
         <option value="ru-ip">RU — ИП</option>
         <option value="by-ip">BY — ИП</option>
+        <option value="by-self-employed">BY — самозанятый</option>
         <option value="kz-ip">KZ — ИП</option>
         <option value="ua-fop3">UA — ФОП 3 група</option>
       </select>

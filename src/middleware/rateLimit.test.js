@@ -1,6 +1,6 @@
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { createRateLimiter, clientIp, skipWebhooks } = require('./rateLimit');
+const { createRateLimiter, clientIp, skipWebhooks, heavyReadLimiter } = require('./rateLimit');
 
 function mockRes() {
   const headers = {};
@@ -33,6 +33,7 @@ describe('skipWebhooks', () => {
     assert.equal(skipWebhooks({ originalUrl: '/api/billing/webhook' }), true);
     assert.equal(skipWebhooks({ originalUrl: '/api/billing/tribute-webhook' }), true);
     assert.equal(skipWebhooks({ originalUrl: '/api/bot/students/1' }), true);
+    assert.equal(skipWebhooks({ originalUrl: '/api/internal/lesson-worker/tick' }), true);
     assert.equal(skipWebhooks({ originalUrl: '/api/lessons' }), false);
   });
 });
@@ -71,5 +72,37 @@ describe('createRateLimiter', () => {
     });
     assert.equal(called, true);
     assert.equal(other.statusCode, 200);
+  });
+});
+
+describe('heavyReadLimiter', () => {
+  it('keys by user id and returns 429 after max', () => {
+    const limiter = heavyReadLimiter();
+    // Temporarily lower max by creating a dedicated limiter with same keyFn.
+    const tight = createRateLimiter({
+      windowMs: 60_000,
+      max: 2,
+      keyFn: (req) => req.user?.id || clientIp(req),
+    });
+    const nextCalls = [];
+    const next = () => nextCalls.push(1);
+    const req = { user: { id: 'tutor-a' }, ip: '9.9.9.9' };
+    tight(req, mockRes(), next);
+    tight(req, mockRes(), next);
+    const res = mockRes();
+    tight(req, res, next);
+    assert.equal(nextCalls.length, 2);
+    assert.equal(res.statusCode, 429);
+    assert.equal(res.body.code, 'RATE_LIMITED');
+
+    // Other user still allowed.
+    let otherOk = false;
+    tight({ user: { id: 'tutor-b' }, ip: '9.9.9.9' }, mockRes(), () => {
+      otherOk = true;
+    });
+    assert.equal(otherOk, true);
+
+    // heavyReadLimiter factory returns a working middleware.
+    assert.equal(typeof limiter, 'function');
   });
 });

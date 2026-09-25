@@ -1,16 +1,15 @@
-/**
- * Ensure Firebase Auth user admin@simple4u.at exists with emailVerified,
+ * Ensure Firebase Auth user support@simple4u.at exists with emailVerified,
  * and Firestore users/{uid}.role = super_admin.
  *
  * Usage:
  *   ADMIN_BOOTSTRAP_PASSWORD='...' node scripts/ensure-admin-email-user.js
  *
- * Optional: ADMIN_EMAIL=admin@simple4u.at
+ * Optional: ADMIN_EMAIL=support@simple4u.at
  */
 require('dotenv').config();
 const { admin, db, FieldValue } = require('../src/firebase');
 
-const email = String(process.env.ADMIN_EMAIL || 'admin@simple4u.at')
+const email = String(process.env.ADMIN_EMAIL || 'support@simple4u.at')
   .trim()
   .toLowerCase();
 const password = String(process.env.ADMIN_BOOTSTRAP_PASSWORD || '').trim();

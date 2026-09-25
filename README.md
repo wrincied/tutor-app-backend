@@ -209,7 +209,7 @@ Public (no auth):
 | GET | `/api/public/legal/:doc` | Published legal markdown |
 | GET | `/api/public/contact` | Kontakt email |
 
-Admin access requires: email/password sign-in as `admin@simple4u.at` (or `ADMIN_EMAILS`), and Firestore `role=super_admin`. `/app/admin` skips email verification and onboarding.
+Admin access requires: email/password sign-in as `support@simple4u.at` (or `ADMIN_EMAILS`), and Firestore `role=super_admin`. `/app/admin` skips email verification and onboarding.
 
 ---
 
@@ -233,11 +233,13 @@ Default profile on first bootstrap:
 
 | Worker | Schedule | Role |
 |--------|----------|------|
-| `lessonBotNotify` | Every 60 seconds | Telegram reminders; auto-complete **single** lessons **30 min after end** (+ debit + homework/balance notify); runs billing cycle for recurring + delayed |
+| `lessonBotNotify` | **Prod:** Cloud Scheduler every **2 min** → `POST /api/internal/lesson-worker/tick`. **Local:** in-process every 60s (`LESSON_BOT_NOTIFY_MODE` unset) | Telegram reminders; auto-complete **single** lessons **30 min after end** (+ debit + homework/balance notify); heavy billing ~every 10 min |
 | `billingWorker` | Via notify tick (or every 10 min if `LESSON_BOT_NOTIFY_DISABLED=1`) | Recurring occurrences + delayed debit for `completed` + `billing_processed: false` |
 | `emailVerificationWorker` | Every 6 hours (when started) | Purge accounts unverified for 3+ days |
 
-`startLessonBotNotifyWorker()` and `startBillingWorker()` start from `server.js` on listen. Lesson auto-complete is **not** done by the midnight Firebase Function (that job is subscriptions only).
+**Prod (A2):** `LESSON_BOT_NOTIFY_MODE=scheduler` + `minInstances: 0`. Cadence state in Firestore `system/lesson_worker`. Auth header `X-Worker-Secret` = `WORKER_TICK_SECRET` or `BOT_API_SECRET`.
+
+`startLessonBotNotifyWorker()` starts from `server.js` only in interval mode. Lesson auto-complete is **not** done by the midnight Firebase Function (that job is subscriptions only).
 
 ---
 
@@ -319,7 +321,7 @@ node scripts/set-super-admin.js user@gmail.com
 node scripts/set-super-admin.js SNuaQqiQIvgwKkHyzasv0KhZbAU2
 ```
 
-Sign in at `/admin-login` with `admin@simple4u.at` and the admin password. Allowlist is `ADMIN_EMAILS` (defaults to `admin@simple4u.at`). No email-verify gate for `/app/admin`.
+Sign in at `/admin-login` with `support@simple4u.at` and the admin password. Allowlist is `ADMIN_EMAILS` (defaults to `support@simple4u.at`). No email-verify gate for `/app/admin`.
 
 ---
 

@@ -1,9 +1,8 @@
 # Firebase App Hosting — Node.js API (tutor-app-backend)
 # https://tutor-app-backend--tutorassis.europe-west4.hosted.app
 runConfig:
-  # Keep one warm instance so lesson auto-complete and Telegram reminders
-  # are not delayed by App Hosting scale-to-zero.
-  minInstances: 1
+  # A2: scale to zero; Cloud Scheduler wakes POST /api/internal/lesson-worker/tick every 2m.
+  minInstances: 0
   maxInstances: 10
   concurrency: 80
   cpu: 1
@@ -19,6 +18,12 @@ env:
       https://simple4u-64822.web.app,
       https://simple4u-64822.firebaseapp.com,
       https://wrincied.github.io
+    availability:
+      - RUNTIME
+
+  # In-process setInterval off; Scheduler drives lessonBotNotify ticks.
+  - variable: LESSON_BOT_NOTIFY_MODE
+    value: scheduler
     availability:
       - RUNTIME
 

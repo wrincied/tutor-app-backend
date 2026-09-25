@@ -46,7 +46,7 @@ function resolveDebitAmount({ rateUnit, lessonDuration, amount }) {
 
 /**
  * Списание единиц абонемента (занятия или часы) в batch.
- * По умолчанию не уходит ниже 0. При allowNegative (явный выбор репетитора) — можно в долг.
+ * По умолчанию разрешаем уход ниже 0 (долг пакета). allowNegative: false — только clamp ≥ 0.
  */
 function applyBalanceDebit(
   batch,
@@ -60,7 +60,7 @@ function applyBalanceDebit(
     reason,
     amount = 1,
     currentBalance,
-    allowNegative = false,
+    allowNegative = true,
   },
 ) {
   const units = Math.round(Number(amount) * 100) / 100 || 1;
@@ -69,6 +69,8 @@ function applyBalanceDebit(
   const safeCurrent = hasCurrent ? current : 0;
 
   if (allowNegative) {
+    const next = Math.round((safeCurrent - units) * 100) / 100;
+    const inDebt = next < 0;
     batch.update(studentRef, {
       balance_lessons: FieldValue.increment(-units),
       updatedAt: FieldValue.serverTimestamp(),
@@ -77,8 +79,8 @@ function applyBalanceDebit(
       balance_debited: true,
       billing_processed: true,
       balance_units_debited: units,
-      unpaid_debt: true,
-      settled_by_payment_at: FieldValue.delete(),
+      unpaid_debt: inDebt,
+      settled_by_payment_at: inDebt ? FieldValue.delete() : new Date().toISOString(),
       updatedAt: FieldValue.serverTimestamp(),
     });
     appendBalanceLog(batch, {
@@ -89,7 +91,7 @@ function applyBalanceDebit(
       amount: -units,
       reason,
     });
-    return { debited: true, amount: units, unpaidDebt: true };
+    return { debited: true, amount: units, unpaidDebt: inDebt };
   }
 
   const available = Math.max(0, safeCurrent);
@@ -233,6 +235,7 @@ function applyLessonStatusBilling(batch, {
           reason: 'lesson_completed',
           amount: debitAmount,
           currentBalance: studentBalance,
+          allowNegative: true,
         });
         return { debited: true, amount: debitAmount };
       }
@@ -303,8 +306,10 @@ function applyLessonStatusBilling(batch, {
         });
         batch.update(lessonRef, {
           billing_processed: true,
-          balance_debited: true,
+          balance_debited: false,
           balance_units_debited: debitAmount,
+          unpaid_debt: true,
+          settled_by_payment_at: FieldValue.delete(),
           updatedAt: FieldValue.serverTimestamp(),
         });
         appendBalanceLog(batch, {
@@ -403,6 +408,8 @@ function applyLessonStatusBilling(batch, {
         billing_processed_at: FieldValue.delete(),
         completed_at: FieldValue.delete(),
         balance_units_debited: FieldValue.delete(),
+        unpaid_debt: false,
+        settled_by_payment_at: FieldValue.delete(),
         updatedAt: FieldValue.serverTimestamp(),
       });
       appendBalanceLog(batch, {

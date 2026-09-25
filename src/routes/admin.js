@@ -8,7 +8,9 @@ const { serializeDoc } = require('../utils/serialize');
 const { enrichUserProfile, subscriptionLabel } = require('../utils/userProfile');
 const { getPlanPricing, getSubscriptionPricing, resolvePricingCountry } = require('../utils/subscriptionPricing');
 const {
-  buildAdminDashboard,
+  getCachedAdminDashboard,
+  getCachedAdminUsersPayload,
+  invalidateAdminOverviewCaches,
   isIncludedInKpi,
   DEFAULT_DASHBOARD_WIDGETS,
   normalizeDashboardWidgets,
@@ -126,9 +128,14 @@ router.use(auth, requireSuperAdmin);
 
 registerLandingAdminRoutes(router);
 
+function wantsFreshAdminCache(req) {
+  const raw = String(req.query?.refresh || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
+
 router.get('/dashboard', async (req, res, next) => {
   try {
-    const payload = await buildAdminDashboard(db);
+    const payload = await getCachedAdminDashboard(db, { force: wantsFreshAdminCache(req) });
     res.json(payload);
   } catch (error) {
     next(error);
@@ -276,19 +283,24 @@ router.get('/recent-activity', async (req, res, next) => {
   }
 });
 
+async function buildAdminUsersList() {
+  let snap;
+  try {
+    snap = await db.collection('users').orderBy('createdAt', 'desc').limit(500).get();
+  } catch {
+    snap = await db.collection('users').limit(500).get();
+  }
+
+  const studentCounts = await buildStudentsCountByTutor(db);
+  return snap.docs.map((doc) => adminUserRow(doc, studentCounts.get(doc.id) ?? 0));
+}
+
 router.get('/users', async (req, res, next) => {
   try {
-    let snap;
-    try {
-      snap = await db.collection('users').orderBy('createdAt', 'desc').limit(500).get();
-    } catch {
-      snap = await db.collection('users').limit(500).get();
-    }
-
-    const studentCounts = await buildStudentsCountByTutor(db);
-    res.json(
-      snap.docs.map((doc) => adminUserRow(doc, studentCounts.get(doc.id) ?? 0)),
-    );
+    const rows = await getCachedAdminUsersPayload(db, buildAdminUsersList, {
+      force: wantsFreshAdminCache(req),
+    });
+    res.json(rows);
   } catch (error) {
     next(error);
   }
@@ -314,6 +326,7 @@ router.put('/users/:id/subscription', async (req, res, next) => {
     }
 
     await userRef.update(built.patch);
+    await invalidateAdminOverviewCaches(db);
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, user: updated });
   } catch (error) {
@@ -339,6 +352,7 @@ router.put('/users/:id/kpi', async (req, res, next) => {
       include_in_kpi: include,
       updatedAt: FieldValue.serverTimestamp(),
     });
+    await invalidateAdminOverviewCaches(db);
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, user: updated });
   } catch (error) {
@@ -364,6 +378,7 @@ router.put('/users/:id/early-adopter', async (req, res, next) => {
       isEarlyAdopter: flag,
       updatedAt: FieldValue.serverTimestamp(),
     });
+    await invalidateAdminOverviewCaches(db);
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, user: updated });
   } catch (error) {
@@ -401,6 +416,7 @@ router.post('/users/:id/grant-early-pro', async (req, res, next) => {
     }
 
     await userRef.update(patch);
+    await invalidateAdminOverviewCaches(db);
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, days: EARLY_PRO_DAYS, user: updated });
   } catch (error) {
@@ -421,6 +437,7 @@ router.post('/users/:id/grant-trial', async (req, res, next) => {
 
     const built = buildSubscriptionPatch('trial', req.body?.trial_ends_at);
     await userRef.update(built.patch);
+    await invalidateAdminOverviewCaches(db);
 
     const updated = adminUserRow(await userRef.get());
     res.json({
@@ -465,6 +482,7 @@ router.post('/users/:id/verify-email', async (req, res, next) => {
       },
       { merge: true },
     );
+    await invalidateAdminOverviewCaches(db);
 
     const updated = adminUserRow(await userRef.get());
     res.json({ ok: true, user: updated });

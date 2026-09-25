@@ -45,6 +45,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/public', publicLegalRoutes);
 app.use('/api/bot', require('./src/routes/botWebhook'));
+app.use('/api/internal', require('./src/routes/internalWorker'));
 app.use('/api/students', studentRoutes);
 app.use('/api/lessons', lessonRoutes);
 app.use('/api/finance', financeRoutes);

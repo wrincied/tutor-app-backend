@@ -7,7 +7,8 @@ const { db, FieldValue } = require('../firebase');
 const { serializeDoc, serializeQuerySnapshot } = require('../utils/serialize');
 const { generatePastelColor } = require('../utils/pastelColor');
 const { normalizeBillingType, normalizeRateUnit, parseNonNegativeInt, parseBalanceAmount } = require('../utils/studentBilling');
-const { settleUnpaidLessonsOnTopup } = require('../utils/topupSettle');
+const { settleUnpaidLessonsOnTopup, selectUnpaidLessonsForSettlement, lessonUnits, resolveUnpaidLessonScheduledAt } = require('../utils/topupSettle');
+const { isSafeFirestoreId } = require('../utils/safeId');
 const { studentSnapshotFromStudent } = require('../utils/lessonSnapshot');
 const {
   collectPatchChanges,
@@ -752,6 +753,37 @@ router.post('/:id/telegram-disconnect', async (req, res, next) => {
   }
 });
 
+router.get('/:id/unpaid-lessons', async (req, res, next) => {
+  try {
+    const tutorId = req.user.id;
+    if (!isSafeFirestoreId(req.params.id)) {
+      return res.status(400).json({ message: 'Invalid student id', code: 'INVALID_ID' });
+    }
+    const studentRef = db.collection('students').doc(req.params.id);
+    const studentSnap = await studentRef.get();
+    if (!studentSnap.exists || studentSnap.data().tutor_id !== tutorId) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    const student = studentSnap.data();
+    const rateUnit = normalizeRateUnit(student.rate_unit);
+    const snap = await db.collection('lessons').where('student_id', '==', studentRef.id).get();
+    const lessons = snap.docs.map((doc) => ({ id: doc.id, _id: doc.id, ...doc.data() }));
+    const unpaid = selectUnpaidLessonsForSettlement(lessons, student, rateUnit);
+    const billingType = normalizeBillingType(student.billing_type);
+    // Package debt is the newest tail; postpaid pays oldest first — match preview date.
+    const preferNewest = billingType === 'package';
+    res.json(
+      unpaid.map((lesson) => ({
+        _id: lesson._id || lesson.id,
+        scheduledAt: resolveUnpaidLessonScheduledAt(lesson, { preferNewest }),
+        units: lessonUnits(lesson, rateUnit),
+      })),
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/:id/topup', async (req, res, next) => {
   try {
     const tutorId = req.user.id;
@@ -809,12 +841,18 @@ router.post('/:id/topup', async (req, res, next) => {
       paidAtIso: last_topup.at,
     });
 
-    await studentRef.update({
-      balance_lessons: FieldValue.increment(added),
+    const billingType = normalizeBillingType(before.billing_type);
+    const studentPatch = {
       total_topup_units: FieldValue.increment(added),
       last_topup,
       updatedAt: FieldValue.serverTimestamp(),
-    });
+    };
+    // Package: credit prepaid balance. Postpaid: settle marks lessons paid; do not inflate balance_lessons.
+    if (billingType === 'package') {
+      studentPatch.balance_lessons = FieldValue.increment(added);
+    }
+
+    await studentRef.update(studentPatch);
     const updatedSnap = await studentRef.get();
     let updated = serializeDoc(updatedSnap);
 
@@ -927,6 +965,8 @@ router.post('/:id/topup', async (req, res, next) => {
       ...withTelegramDeepLink(updated),
       telegram_receipt_sent,
       telegram_receipt_attempted: wantsReceipt,
+      settled_lesson_ids: settlement.settledLessonIds,
+      settled_units: settlement.settledUnits,
     });
   } catch (error) {
     next(error);
